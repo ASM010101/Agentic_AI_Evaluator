@@ -1,0 +1,84 @@
+{
+  "name": "Add two integers safely",
+  "problem_statement": "Read two integers on one line separated by whitespace and print their sum followed by a newline. The program must accept negative values and zero. The rules use a 64-bit result for the overflow boundary cases.",
+  "rules": {
+    "problem": "add_two_integers",
+    "time_limit_s": 1,
+    "memory_limit_mb": 64,
+    "metrics": [
+      {
+        "name": "correctness",
+        "analyzer": "io_tests",
+        "weight": 0.6,
+        "scoring": {"mode": "test_ratio"},
+        "params": {"comparison": "trim_trailing_whitespace"}
+      },
+      {
+        "name": "syntax",
+        "analyzer": "compiler_warnings",
+        "weight": 0.1,
+        "scoring": {"mode": "evidence_score"},
+        "params": {"max_warnings": 0}
+      },
+      {
+        "name": "structure",
+        "analyzer": "static_analysis",
+        "weight": 0.1,
+        "scoring": {"mode": "evidence_score"},
+        "params": {"max_cyclomatic": 8, "max_function_length": 40}
+      },
+      {
+        "name": "modularity",
+        "analyzer": "function_split",
+        "weight": 0.1,
+        "scoring": {"mode": "evidence_score"},
+        "params": {"min_functions": 2}
+      },
+      {
+        "name": "memory_safety",
+        "analyzer": "sanitizer_run",
+        "weight": 0.1,
+        "scoring": {"mode": "evidence_score"},
+        "params": {"flags": "-fsanitize=address,undefined"}
+      }
+    ],
+    "tests": [
+      {
+        "id": "sample",
+        "input": "7 5\n",
+        "expected_output": "12\n",
+        "rationale": "The explicit sample in the problem statement.",
+        "provenance": "problem_statement",
+        "status": "validated",
+        "requirement_id": "REQ-PROBLEM"
+      },
+      {
+        "id": "negative-values",
+        "input": "-7 5\n",
+        "expected_output": "-2\n",
+        "rationale": "The statement explicitly requires negative values.",
+        "provenance": "explicit_rule",
+        "status": "validated",
+        "requirement_id": "REQ-PROBLEM"
+      },
+      {
+        "id": "zero",
+        "input": "0 0\n",
+        "expected_output": "0\n",
+        "rationale": "The statement explicitly requires zero.",
+        "provenance": "explicit_rule",
+        "status": "validated",
+        "requirement_id": "REQ-PROBLEM"
+      },
+      {
+        "id": "wide-positive",
+        "input": "2147483647 1\n",
+        "expected_output": "2147483648\n",
+        "rationale": "The statement defines a 64-bit result for overflow boundary cases.",
+        "provenance": "explicit_rule",
+        "status": "validated",
+        "requirement_id": "REQ-PROBLEM"
+      }
+    ]
+  }
+}
