@@ -29,13 +29,89 @@ def _function_count(source: str) -> int:
     return len(pattern.findall(source))
 
 
+def _function_bodies(source: str) -> list[tuple[str, str]]:
+    """Return approximate function bodies for bounded source heuristics."""
+
+    pattern = re.compile(r"(?P<name>[A-Za-z_]\w*)\s*\([^;{}]*\)\s*\{")
+    result: list[tuple[str, str]] = []
+    for match in pattern.finditer(source):
+        depth = 1
+        cursor = match.end()
+        while cursor < len(source) and depth:
+            if source[cursor] == "{":
+                depth += 1
+            elif source[cursor] == "}":
+                depth -= 1
+            cursor += 1
+        result.append((match.group("name"), source[match.end() : max(match.end(), cursor - 1)]))
+    return result
+
+
+def _has_logarithmic_loop(body: str) -> bool:
+    midpoint = bool(re.search(r"\b(?:mid|middle)\b\s*=.*(?:/\s*2|>>\s*1)", body))
+    shrinking_bounds = bool(
+        re.search(
+            r"\b(?:left|right|low|high|lo|hi)\s*=\s*(?:[^;]*\b(?:mid|middle)\b|[^;]*/\s*2)",
+            body,
+        )
+    )
+    return midpoint and shrinking_bounds and bool(re.search(r"\b(?:while|for)\b", body))
+
+
+def _has_loop(body: str) -> bool:
+    return bool(re.search(r"\b(?:for|while|do)\b", body))
+
+
+def _has_nested_loop(source: str) -> bool:
+    return bool(
+        re.search(
+            r"\b(?:for|while)\s*\([^{}]*\)\s*\{[^{}]*\b(?:for|while)\s*\(",
+            source,
+            re.DOTALL,
+        )
+    )
+
+
+def _estimate_complexity(source: str) -> str:
+    """Estimate common loop compositions without pretending to parse all C."""
+
+    functions = _function_bodies(source)
+    logarithmic_functions = {name for name, body in functions if _has_logarithmic_loop(body)}
+    looping_functions = {name for name, body in functions if _has_loop(body)}
+
+    if _has_nested_loop(source):
+        return "O(n^2) or nested-loop dependent"
+
+    # A loop that repeatedly calls a binary-search helper is O(n log n) (or
+    # O(q log n) for multiple queries), even though the loops are in separate
+    # function bodies.
+    for caller, body in functions:
+        if not _has_loop(body):
+            continue
+        for callee in logarithmic_functions:
+            if callee != caller and re.search(rf"\b{re.escape(callee)}\s*\(", body):
+                return "O(nlogn) or loop-composition dependent"
+
+    # The same composition with a linear helper is quadratic.
+    for caller, body in functions:
+        if not _has_loop(body):
+            continue
+        for callee in looping_functions - logarithmic_functions:
+            if callee != caller and re.search(rf"\b{re.escape(callee)}\s*\(", body):
+                return "O(n^2) or loop-composition dependent"
+
+    if logarithmic_functions:
+        return "O(logn) or halving-loop dependent"
+    if not re.search(r"\b(?:for|while|do)\b", source):
+        return "O(1)"
+    return "O(n) or linear-loop dependent"
+
+
 def analyze_solution(source: str, complexity_required: str | None = None) -> SolutionAnalysis:
     loops = len(re.findall(r"\b(for|while|do)\b", source))
     conditions = len(re.findall(r"\b(if|switch|case)\b|&&|\|\|", source))
     functions = _function_count(source)
-    complexity = "O(1)" if loops == 0 else "O(n) or problem-dependent"
-    if loops >= 2 or re.search(r"for\s*\([^)]*\)\s*\{[^{}]*(?:for|while)\b", source, re.DOTALL):
-        complexity = "O(n^2) or nested-loop dependent"
+    complexity = _estimate_complexity(source)
     findings: list[SolutionFinding] = []
     if "main(" not in source:
         findings.append(
@@ -60,7 +136,7 @@ def analyze_solution(source: str, complexity_required: str | None = None) -> Sol
         else "dynamic allocation detected",
         findings=findings,
         provenance={
-            "method": "deterministic_source_heuristic_v1",
+            "method": "deterministic_source_heuristic_v2",
             "complexity_requirement": complexity_required,
         },
     )

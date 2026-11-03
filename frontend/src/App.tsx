@@ -106,7 +106,32 @@ function Badge({ value }: { value: string }): ReactElement {
         : value === "completed" || value === "active" || value === "pass"
           ? "success"
           : "neutral";
-  return <span className={`badge badge-${tone}`}>{value.replaceAll("_", " ")}</span>;
+  const labels: Record<string, string> = {
+    requires_review: "requires score review",
+    review_signal: "review signal",
+  };
+  return (
+    <span className={`badge badge-${tone}`}>{labels[value] ?? value.replaceAll("_", " ")}</span>
+  );
+}
+
+function evidenceStatus(item: Evidence): string {
+  // Older runs used requires_review for non-scoring tool/similarity evidence.
+  // Keep those records understandable while new runs use review_signal.
+  if (
+    (item.status === "requires_review" || item.status === "inconclusive") &&
+    (item.details.scoring_impact === false ||
+      item.source_type === "static_analysis_tool" ||
+      item.source_type === "similarity")
+  ) {
+    return "review_signal";
+  }
+  return item.status;
+}
+
+function reportPreview(report: Record<string, unknown>): string {
+  const studentReport = report.student_report;
+  return typeof studentReport === "string" ? studentReport : JSON.stringify(report, null, 2);
 }
 
 const pipelineStages = [
@@ -513,6 +538,7 @@ function AssignmentsPage(): ReactElement {
   const [rulesText, setRulesText] = useState(exampleRules);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [preparing, setPreparing] = useState(false);
   const load = useCallback(
     () =>
       api
@@ -544,6 +570,7 @@ function AssignmentsPage(): ReactElement {
   const create = async (): Promise<void> => {
     setError(null);
     setMessage(null);
+    setPreparing(true);
     try {
       const rules = JSON.parse(rulesText) as Record<string, unknown>;
       const assignment = await api.createAssignment({ name, problem_statement: problem, rules });
@@ -555,6 +582,8 @@ function AssignmentsPage(): ReactElement {
       await load();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Could not create assignment");
+    } finally {
+      setPreparing(false);
     }
   };
   const selectAssignment = async (id: string): Promise<void> => {
@@ -570,6 +599,9 @@ function AssignmentsPage(): ReactElement {
   };
   const prepare = async (): Promise<void> => {
     if (!selected) return;
+    setError(null);
+    setMessage("Preparing a new version; optional model analysis has a bounded timeout.");
+    setPreparing(true);
     try {
       const rules = JSON.parse(rulesText) as Record<string, unknown>;
       const result = await api.prepare(selected.id, {
@@ -582,6 +614,8 @@ function AssignmentsPage(): ReactElement {
       await load();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Could not prepare version");
+    } finally {
+      setPreparing(false);
     }
   };
   const activate = async (version: AssignmentVersion): Promise<void> => {
@@ -659,8 +693,12 @@ function AssignmentsPage(): ReactElement {
               </label>
               <small>Edit the imported JSON directly before creating or preparing a version.</small>
             </div>
-            <button className="button button-primary" onClick={() => void create()}>
-              Create and prepare <span>→</span>
+            <button
+              className="button button-primary"
+              onClick={() => void create()}
+              disabled={preparing}
+            >
+              {preparing ? "Preparing…" : "Create and prepare"} {!preparing && <span>→</span>}
             </button>
           </div>
         </Panel>
@@ -700,8 +738,12 @@ function AssignmentsPage(): ReactElement {
               title={selected.name}
               eyebrow="VERSION HISTORY"
               action={
-                <button className="button button-ghost" onClick={() => void prepare()}>
-                  Prepare new version
+                <button
+                  className="button button-ghost"
+                  onClick={() => void prepare()}
+                  disabled={preparing}
+                >
+                  {preparing ? "Preparing…" : "Prepare new version"}
                 </button>
               }
             >
@@ -739,10 +781,20 @@ function AssignmentsPage(): ReactElement {
                   <div className="spec-header">
                     <strong>Preparation preview</strong>
                     <Badge
-                      value={`${selected.versions[0].spec.tests.filter((test) => test.status === "validated").length} validated tests`}
+                      value={`${selected.versions[0].spec.tests.filter((test) => test.status === "validated").length} validated · ${selected.versions[0].spec.tests.filter((test) => test.provenance === "llm_candidate").length} agent candidates`}
                     />
                   </div>
                   <p>{selected.versions[0].spec.summary}</p>
+                  {(selected.versions[0].spec.agent_runs ?? []).length > 0 && (
+                    <div className="mini-history" aria-label="Assignment agent activity">
+                      {(selected.versions[0].spec.agent_runs ?? []).map((run, index) => (
+                        <span key={`${String(run.agent)}-${index}`}>
+                          {String(run.agent ?? "agent")} · {String(run.status ?? "unknown")}
+                          {run.model ? ` · ${String(run.model)}` : ""}
+                        </span>
+                      ))}
+                    </div>
+                  )}
                   {selected.versions[0].spec.ambiguities.map((item) => (
                     <div className="notice-line" key={item.id}>
                       <span>!</span>
@@ -1246,6 +1298,12 @@ function SubmissionDetail({ id }: { id: string }): ReactElement {
       </div>
     );
   const score = result.score;
+  const reviewSignals = evidence.filter((item) => evidenceStatus(item) === "review_signal");
+  const scoreReviewItems = evidence.filter((item) => {
+    const status = evidenceStatus(item);
+    return status === "requires_review" || status === "unavailable";
+  });
+  const hasSimilaritySignal = reviewSignals.some((item) => item.source_type === "similarity");
   return (
     <div className="page-stack">
       <div className="back-row">
@@ -1266,11 +1324,32 @@ function SubmissionDetail({ id }: { id: string }): ReactElement {
         <div className="grade-lockup">
           <span>GRADE</span>
           <strong>{score?.total_score == null ? "—" : score.total_score.toFixed(1)}</strong>
-          <small>{score?.finalized ? "/ 100" : "needs review"}</small>
+          <small>{score?.finalized ? "/ 100" : "score requires review"}</small>
         </div>
       </div>
       {result.evaluation?.error_summary && (
         <div className="alert alert-danger">{result.evaluation.error_summary}</div>
+      )}
+      {reviewSignals.length > 0 && (
+        <div className="review-banner investigation-review-banner">
+          <span>i</span>
+          <div>
+            <strong>Review signals do not change this grade.</strong>
+            <p>
+              These are observations from local tools, similarity comparison, or advisory LLM
+              agents. They never change the deterministic grade. Expand an item below to inspect its
+              bounded output and agent status.
+              {hasSimilaritySignal
+                ? " Similarity pairs can be dispositioned in Similarity Review."
+                : ""}
+            </p>
+            {hasSimilaritySignal && (
+              <button className="button button-small" onClick={() => navigate("similarity")}>
+                Open Similarity Review
+              </button>
+            )}
+          </div>
+        </div>
       )}
       {liveRun && (
         <Panel
@@ -1343,14 +1422,12 @@ function SubmissionDetail({ id }: { id: string }): ReactElement {
               <span>failed</span>
             </div>
             <div>
-              <strong>
-                {
-                  evidence.filter(
-                    (item) => item.status === "requires_review" || item.status === "unavailable",
-                  ).length
-                }
-              </strong>
-              <span>uncertain</span>
+              <strong>{reviewSignals.length}</strong>
+              <span>review signals</span>
+            </div>
+            <div>
+              <strong>{scoreReviewItems.length}</strong>
+              <span>score review</span>
             </div>
           </div>
           <div className="audit-note">
@@ -1385,35 +1462,67 @@ function SubmissionDetail({ id }: { id: string }): ReactElement {
                 detail="The coordinator has not produced findings."
               />
             ) : (
-              evidence.map((item) => (
-                <div className={`evidence-item evidence-${item.status}`} key={item.id}>
-                  <div className="evidence-top">
-                    <Badge value={item.status} />
-                    <span>
-                      {item.source_type}
-                      {item.test_id ? ` · ${item.test_id}` : ""}
-                    </span>
-                  </div>
-                  <strong>{item.summary}</strong>
-                  {item.input !== null && (
-                    <div className="io-grid">
-                      <div>
-                        <small>INPUT</small>
-                        <pre>{item.input}</pre>
-                      </div>
-                      <div>
-                        <small>EXPECTED</small>
-                        <pre>{item.expected_output}</pre>
-                      </div>
-                      <div>
-                        <small>ACTUAL</small>
-                        <pre>{item.actual_output}</pre>
-                      </div>
+              evidence.map((item) => {
+                const status = evidenceStatus(item);
+                const toolOutput =
+                  typeof item.details.output === "string"
+                    ? item.details.output
+                    : typeof item.details.error === "string"
+                      ? item.details.error
+                      : item.details.agent_output || item.details.feedback
+                        ? JSON.stringify(
+                            item.details.agent_output ?? item.details.feedback,
+                            null,
+                            2,
+                          )
+                        : "";
+                const toolName =
+                  typeof item.details.tool === "string"
+                    ? item.details.tool
+                    : typeof item.details.agent_status === "string"
+                      ? `${item.source_type} (${item.details.agent_status})`
+                      : "tool";
+                return (
+                  <div className={`evidence-item evidence-${status}`} key={item.id}>
+                    <div className="evidence-top">
+                      <Badge value={status} />
+                      <span>
+                        {item.source_type}
+                        {item.test_id ? ` · ${item.test_id}` : ""}
+                      </span>
                     </div>
-                  )}
-                  <small className="evidence-id">{item.id}</small>
-                </div>
-              ))
+                    <strong>{item.summary}</strong>
+                    {status === "review_signal" && (
+                      <small className="evidence-note">
+                        Review-only observation · no grade impact
+                      </small>
+                    )}
+                    {item.input !== null && (
+                      <div className="io-grid">
+                        <div>
+                          <small>INPUT</small>
+                          <pre>{item.input}</pre>
+                        </div>
+                        <div>
+                          <small>EXPECTED</small>
+                          <pre>{item.expected_output}</pre>
+                        </div>
+                        <div>
+                          <small>ACTUAL</small>
+                          <pre>{item.actual_output}</pre>
+                        </div>
+                      </div>
+                    )}
+                    {toolOutput && (
+                      <details className="evidence-output">
+                        <summary>Inspect {toolName} output</summary>
+                        <pre>{toolOutput}</pre>
+                      </details>
+                    )}
+                    <small className="evidence-id">{item.id}</small>
+                  </div>
+                );
+              })
             )}
           </div>
         </Panel>
@@ -1421,19 +1530,29 @@ function SubmissionDetail({ id }: { id: string }): ReactElement {
       {result.report && (
         <Panel
           title="Feedback report"
-          eyebrow="TEMPLATE-VALIDATED OUTPUT"
+          eyebrow="EVIDENCE-LINKED REPORT"
           action={
-            <a
-              className="button button-small"
-              href={reportDownloadUrl(result.report.id, "txt")}
-              target="_blank"
-              rel="noreferrer"
-            >
-              Download report
-            </a>
+            <>
+              <a
+                className="button button-small"
+                href={reportDownloadUrl(result.report.id, "txt")}
+                target="_blank"
+                rel="noreferrer"
+              >
+                Download report
+              </a>
+              <a
+                className="button button-small button-secondary"
+                href={reportDownloadUrl(result.report.id, "json")}
+                target="_blank"
+                rel="noreferrer"
+              >
+                Download JSON
+              </a>
+            </>
           }
         >
-          <pre className="report-preview">{JSON.stringify(result.report.report, null, 2)}</pre>
+          <pre className="report-preview">{reportPreview(result.report.report)}</pre>
         </Panel>
       )}
     </div>

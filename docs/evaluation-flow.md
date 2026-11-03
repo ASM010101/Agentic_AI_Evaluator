@@ -3,8 +3,8 @@
 ```mermaid
 flowchart TD
     A[Create assignment] --> B[Validate problem + JSON rules]
-    B --> C[Prepare immutable assignment version]
-    C --> D[Record requirements, rubric and test provenance]
+    B --> C[Agent 1: extract requirements and propose candidate tests]
+    C --> D[Record typed assignment spec and test provenance]
     D --> E{Score-affecting ambiguity?}
     E -- Yes --> F[needs_review; block activation]
     E -- No --> G[Activate version]
@@ -14,16 +14,19 @@ flowchart TD
     I --> J[Create durable evaluation runs]
     J --> K[Compile in Bubblewrap sandbox]
     J --> L[Source/static checks]
-    J --> M[Assignment-scoped similarity]
-    K --> N[Run only validated executable tests]
-    L --> O[Typed evidence]
-    M --> O
-    N --> O
-    O --> P{Missing or uncertain evidence?}
-    P -- Yes --> Q[needs_review; no silent zero]
-    P -- No --> R[Pure deterministic score]
-    R --> S[Template feedback report]
-    S --> T[Persist report + audit trail]
+    J --> M[Agent 2: solution/compliance/complexity review]
+    J --> N[Agent 3: review selected similarity candidates]
+    K --> O[Run only validated executable tests]
+    L --> P[Typed evidence]
+    M --> P
+    N --> P
+    O --> P
+    P --> Q{Missing or uncertain scoring evidence?}
+    Q -- Yes --> R[needs_review; no silent zero]
+    Q -- No --> S[Pure deterministic score]
+    S --> T[Agent 4: evidence-linked feedback]
+    R --> T
+    T --> U[Persist report + audit trail]
 ```
 
 The UI reads persisted run and audit events through
@@ -38,6 +41,12 @@ automated tests.
 scoring → reporting → completed` is the normal path. `needs_review`, `failed`,
 and `cancelled` are explicit terminal or operator-action states. Illegal
 transitions are rejected by the state machine and covered by unit tests.
+
+`requires_review` is reserved for missing or uncertain score-affecting evidence.
+Non-scoring observations from local analysis tools, similarity comparison and
+the advisory LLM agents use `review_signal`: they remain visible for instructor
+inspection but do not block or change a finalized grade. Agent 4 receives the
+final deterministic score and can only write validated feedback around it.
 
 ## No-reference-solution policy
 

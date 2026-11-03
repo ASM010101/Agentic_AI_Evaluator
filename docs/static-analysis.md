@@ -60,6 +60,9 @@ provenance.source = local_linux_toolchain
 ```
 
 Each result keeps the tool name, bounded output, exit status, duration,
-timeout/truncation state and a review-oriented status. The report can therefore
-show what a tool observed without confusing a tool warning with a confirmed
-functional failure.
+timeout/truncation state and a `review_signal` status when the tool reports
+something. A review signal is an observation for the instructor; it does not
+block a completed grade and has no scoring impact. Advisory LLM findings use
+the same boundary and include their agent/provider status in provenance. Open
+the submission's **Findings & tests** panel and expand the output to inspect
+it. Similarity signals are reviewed separately in **Similarity Review**.

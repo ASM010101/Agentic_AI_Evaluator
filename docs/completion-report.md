@@ -16,21 +16,22 @@
 
 ### Agents and evaluation
 
-- Role 1: deterministic assignment understanding/test-design normalizer; it
-  preserves explicit instructor tests and refuses to activate unverified
-  score-affecting oracles.
-- Role 2: typed deterministic source/complexity analysis with findings and
-  uncertainty labels.
-- Role 3: assignment-scoped normalized token fingerprints and review-only
-  similarity findings.
-- Role 4: evidence-linked deterministic report template with usefulness and
-  limitations examples.
+- Role 1: typed LLM-assisted assignment understanding/test design layered over
+  the deterministic normalizer; model tests remain non-scoring candidates until
+  an instructor validates their oracle.
+- Role 2: deterministic source/complexity analysis plus a typed LLM
+  solution/compliance review persisted as review-only evidence.
+- Role 3: assignment-scoped normalized token fingerprints with optional typed
+  LLM explanations for selected flagged pairs.
+- Role 4: deterministic evidence-linked report facts plus optional typed LLM
+  feedback whose evidence references are validated before persistence.
 - Role 5: Python coordinator/state machine with Bubblewrap, optional Docker and
   fake runner adapters.
 - Pure deterministic score engine; unavailable evidence is not silently turned
   into a pass or an arbitrary zero.
-- Bounded Ollama client with configurable endpoint/model, timeout, retry and
-  concurrency policy. Deterministic mode works without Ollama.
+- Bounded Ollama/OpenAI-compatible runtime with configurable endpoint/model,
+  timeout, retry and concurrency policy. Each agent call records status,
+  provider/model and latency; deterministic fallback remains available.
 
 ### UI
 
@@ -52,9 +53,10 @@
 
 ## Architecture deviations
 
-1. **No live Ollama reasoning in the ordinary test path.** The environment does
-   not provide Ollama, so deterministic typed analyzers/templates are the safe
-   default. The Ollama integration is present and bounded but optional.
+1. **Live provider calls are not part of the default automated suite.** Tests use
+   a mocked typed provider to prove Agent 1/2/3/4 call sites and fallback paths.
+   A configured Ollama, Groq or OpenRouter provider runs the same roles when
+   `AUTOGRADER_USE_LLM=true`.
 2. **Bubblewrap is the default real Linux runner.** The Linux-native sandbox
    was verified for compilation, execution, host-path isolation, resource
    limits and local C static-analysis tools. Docker remains optional and was
@@ -93,8 +95,7 @@ bash scripts/setup_linux_sandbox.sh
 
 ## Checks executed
 
-- `python -m pytest tests -q` from `backend/`: **23 passed**, one upstream
-  Starlette/httpx deprecation warning.
+- `python -m pytest tests -q` from `backend/`: **30 passed, 4 skipped**.
 - `python -m pytest tests --cov=app --cov-report=term-missing`: **83% measured
   backend application coverage**.
 - `python -m ruff check app tests`: passed.
@@ -114,7 +115,10 @@ bash scripts/setup_linux_sandbox.sh
   the Bubblewrap runner and emitted a durable `batch=<id>`.
 - Bubblewrap smoke: completed real compile/run, host-path isolation, non-root
   execution, resource-limit termination and local C-tool evidence checks.
-- Live Ollama smoke: **not run** because `ollama`/server/model is unavailable.
+- Live remote-provider smoke: **not run** in automated verification because it would
+  send assignment and student-source data to an external model provider; the
+  typed mocked provider and configured health endpoint remain available for an
+  operator-controlled smoke.
 - Playwright E2E: **not run** because the available environment has no browser
   display/runtime.
 
@@ -154,8 +158,8 @@ are test-suite timings, not an under-10-minute batch guarantee.
 
 1. Run the Bubblewrap smoke suite against hostile looping, crashing,
    memory-heavy and output-heavy fixtures on each target Linux distribution.
-2. Configure one Ollama model and exercise bounded model response validation,
-   timeout and malformed-output tests against the live endpoint.
+2. With an operator-approved provider, run one real assignment batch with
+   `AUTOGRADER_USE_LLM=true` and confirm the four persisted agent statuses.
 3. Add browser-backed Playwright tests in a CI environment with a browser.
 4. Add database-backed worker claim locking and authentication before exposing
    the dashboard beyond a trusted local operator.

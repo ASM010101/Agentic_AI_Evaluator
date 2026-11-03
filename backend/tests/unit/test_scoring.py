@@ -77,3 +77,31 @@ def test_missing_evidence_never_silently_becomes_a_final_zero():
     assert result.finalized is False
     assert result.total_score is None
     assert result.criteria[0].status == "unavailable"
+
+
+def test_review_only_evidence_does_not_change_rubric_score():
+    criterion = NormalizedCriterion(
+        id="style",
+        name="Style",
+        analyzer="static_analysis",
+        weight=1.0,
+        description="",
+        scoring_mode="evidence_score",
+    )
+    result = calculate_score(
+        [criterion],
+        [],
+        [
+            EvidenceLike("pass", "style", None, "pass", {"normalized_score": 1.0}),
+            EvidenceLike(
+                "tool-finding",
+                "style",
+                None,
+                "review_signal",
+                {"scoring_impact": False},
+            ),
+        ],
+    )
+    assert result.finalized is True
+    assert result.total_score == 100.0
+    assert result.criteria[0].evidence_ids == ["pass"]

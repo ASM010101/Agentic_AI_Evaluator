@@ -58,7 +58,15 @@ def calculate_score(
     }
 
     for criterion in criteria:
-        relevant = [item for item in evidences if item.criterion_id == criterion.id]
+        # Review-only observations (local tool findings and similarity signals)
+        # are retained in the evidence trail but can never affect rubric points.
+        relevant = [
+            item
+            for item in evidences
+            if item.criterion_id == criterion.id
+            and item.status != "review_signal"
+            and item.details.get("scoring_impact", True) is not False
+        ]
         evidence_ids = [item.id for item in relevant]
         points: float | None
         reason: str

@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import csv
 import io
+import json
+import re
 import shutil
-from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import Response
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
@@ -26,6 +27,7 @@ from app.db.models import (
     SubmissionBatch,
 )
 from app.llm.client import build_llm_client
+from app.agents.report_agent import build_report, render_text
 from app.rules import RulesError, normalize_rules
 from app.schemas import (
     AssignmentDetail,
@@ -201,6 +203,89 @@ def _evaluation_summary(run: EvaluationRun) -> EvaluationSummary:
     return EvaluationSummary.model_validate(run)
 
 
+def _report_document(db: Session, report: Report) -> dict[str, Any]:
+    """Return the current student-facing report shape, including legacy reports."""
+
+    run = db.get(EvaluationRun, report.run_id)
+    if not run:
+        return report.report_json
+    submission = db.get(Submission, run.submission_id)
+    version = db.get(AssignmentVersion, run.assignment_version_id)
+    if not submission or not version:
+        return report.report_json
+    assignment = db.get(Assignment, version.assignment_id)
+    score_row = db.scalar(select(ScoreBreakdown).where(ScoreBreakdown.run_id == run.id))
+    evidence_rows = db.scalars(
+        select(Evidence).where(Evidence.run_id == run.id).order_by(Evidence.created_at)
+    ).all()
+    score_payload = None
+    if score_row:
+        score_payload = {
+            "total_score": score_row.total_score,
+            "finalized": score_row.finalized,
+            "scoring_rule_version": score_row.scoring_rule_version,
+            "criteria": score_row.criteria_json,
+            "calculation_trace": score_row.calculation_trace_json,
+        }
+    evidence_payload = [
+        {
+            "id": item.id,
+            "source_type": item.source_type,
+            "test_id": item.test_id,
+            "status": item.status,
+            "summary": item.summary,
+            "input": item.input_data,
+            "expected_output": item.expected_output,
+            "actual_output": item.actual_output,
+            "details": item.details_json,
+        }
+        for item in evidence_rows
+    ]
+    stored = report.report_json or {}
+    return build_report(
+        assignment={
+            "id": version.assignment_id,
+            "name": assignment.name if assignment else "Untitled assignment",
+            "version_number": version.version_number,
+            "problem_statement": version.problem_statement,
+        },
+        submission={
+            "id": submission.id,
+            "filename": submission.original_filename,
+            "label": submission.label,
+        },
+        evaluation={
+            "run_id": run.id,
+            "state": run.state,
+            "progress": run.progress,
+        },
+        score=score_payload,
+        evidence=evidence_payload,
+        version_hash=version.version_hash,
+        agent_feedback=stored.get("feedback"),
+    )
+
+
+def _report_filename(document: dict[str, Any], extension: str) -> str:
+    assignment = str((document.get("assignment") or {}).get("name") or "assignment")
+    submission = str((document.get("submission") or {}).get("filename") or "submission")
+    stem = re.sub(r"[^A-Za-z0-9._-]+", "_", f"{assignment}_{submission}").strip("._")
+    return f"{(stem or 'autograder_report')[:120]}_report.{extension}"
+
+
+def _llm_name(settings: Settings) -> str:
+    if settings.llm_provider == "ollama":
+        return "ollama"
+    base_url = settings.openai_base_url.lower()
+    if "groq.com" in base_url:
+        return "groq"
+    if "openrouter.ai" in base_url:
+        return "openrouter"
+    if "nvidia.com" in base_url:
+        return "nvidia_nim"
+    return "openai_compatible"
+
+
 @router.get("/health", response_model=HealthResponse)
 def health() -> HealthResponse:
     return HealthResponse(status="ok", service="autograder-api", version="0.1.0")
@@ -232,11 +317,7 @@ def dependency_health(settings: Settings = Depends(get_settings)) -> Dependencie
         )
     llm = build_llm_client(settings)
     llm_available, llm_detail, model = llm.health_sync()
-    llm_name = (
-        "groq"
-        if "groq" in settings.openai_base_url.lower() and settings.llm_provider != "ollama"
-        else ("ollama" if settings.llm_provider == "ollama" else "llm")
-    )
+    llm_name = _llm_name(settings)
     dependencies.append(
         DependencyHealth(name=llm_name, available=llm_available, detail=llm_detail, version=model)
     )
@@ -250,11 +331,7 @@ def dependency_health(settings: Settings = Depends(get_settings)) -> Dependencie
 def model_status(settings: Settings = Depends(get_settings)) -> DependencyHealth:
     llm = build_llm_client(settings)
     available, detail, model = llm.health_sync()
-    name = (
-        "groq"
-        if "groq" in settings.openai_base_url.lower() and settings.llm_provider != "ollama"
-        else ("ollama" if settings.llm_provider == "ollama" else "llm")
-    )
+    name = _llm_name(settings)
     return DependencyHealth(name=name, available=available, detail=detail, version=model)
 
 
@@ -316,6 +393,7 @@ def prepare_route(
     assignment_id: str,
     request: CreateAssignmentRequest | None = None,
     db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
 ) -> PrepareResponse:
     assignment = get_assignment(db, assignment_id)
     if not assignment:
@@ -323,7 +401,7 @@ def prepare_route(
             status_code=404, detail={"code": "not_found", "message": "assignment not found"}
         )
     try:
-        version, warnings = prepare_assignment(db, assignment, request)
+        version, warnings = prepare_assignment(db, assignment, request, settings)
     except (RulesError, ValueError) as exc:
         raise _http_error(exc) from exc
     return PrepareResponse(version=_version_summary(version), warnings=warnings)
@@ -595,6 +673,11 @@ def evaluate_batch(
                     if settings.llm_provider == "openai_compatible"
                     else settings.ollama_model
                 ),
+                "llm_endpoint": (
+                    settings.openai_base_url
+                    if settings.llm_provider == "openai_compatible"
+                    else settings.ollama_base_url
+                ),
             },
         )
         db.add(run)
@@ -701,11 +784,12 @@ def submission_result(submission_id: str, db: Session = Depends(get_db)) -> Subm
             criteria=score.criteria_json,
             calculation_trace=score.calculation_trace_json,
         )
+    report_document = _report_document(db, report) if report else None
     report_response = (
         ReportResponse(
             id=report.id,
             run_id=report.run_id,
-            report=report.report_json,
+            report=report_document or {},
             created_at=report.created_at,
         )
         if report
@@ -763,15 +847,19 @@ def download_report(report_id: str, format: str = "txt", db: Session = Depends(g
         raise HTTPException(
             status_code=404, detail={"code": "not_found", "message": "report not found"}
         )
-    path = Path(report.json_path if format == "json" else report.text_path or "")
-    if not path.exists() or path.is_dir():
-        raise HTTPException(
-            status_code=404, detail={"code": "not_found", "message": "report artifact not found"}
-        )
-    return FileResponse(
-        path,
-        media_type="application/json" if format == "json" else "text/plain",
-        filename=path.name,
+    document = _report_document(db, report)
+    if format == "json":
+        content = json.dumps(document, indent=2, ensure_ascii=False) + "\n"
+        media_type = "application/json"
+    else:
+        content = render_text(document)
+        media_type = "text/plain; charset=utf-8"
+    return Response(
+        content=content,
+        media_type=media_type,
+        headers={
+            "Content-Disposition": f'attachment; filename="{_report_filename(document, format)}"'
+        },
     )
 
 

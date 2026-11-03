@@ -151,6 +151,29 @@ const evidence = [
     provenance: {},
     created_at: "2026-10-24T00:02:00Z",
   },
+  {
+    id: "evidence-tool",
+    assignment_version_id: activeVersion.id,
+    submission_id: submission.id,
+    run_id: evaluation.id,
+    source_type: "static_analysis_tool",
+    requirement_id: null,
+    rubric_criterion_id: null,
+    test_id: null,
+    status: "review_signal",
+    summary: "cppcheck reported review-only source-analysis findings.",
+    details: {
+      tool: "cppcheck",
+      output: "warning: possible null pointer",
+      scoring_impact: false,
+    },
+    source_location: null,
+    input: null,
+    expected_output: null,
+    actual_output: null,
+    provenance: { tool: "cppcheck" },
+    created_at: "2026-10-24T00:02:00Z",
+  },
 ];
 const result = {
   submission,
@@ -333,6 +356,10 @@ describe("dashboard workflows", () => {
     fireEvent.click(screen.getByRole("button", { name: "Inspect" }));
     expect(await screen.findByRole("heading", { name: "correct.c" })).toBeInTheDocument();
     expect(screen.getByText("Test sample failed.")).toBeInTheDocument();
+    expect(screen.getByText("review signal")).toBeInTheDocument();
+    expect(screen.getByText("Review-only observation · no grade impact")).toBeInTheDocument();
+    fireEvent.click(screen.getByText("Inspect cppcheck output"));
+    expect(screen.getByText("warning: possible null pointer")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /Back to results/ }));
 
     fireEvent.click(screen.getByRole("button", { name: /Similarity Review/ }));

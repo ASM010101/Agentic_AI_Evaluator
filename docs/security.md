@@ -18,6 +18,11 @@
   renders them in text/code elements rather than injecting HTML.
 - Similarity results are review evidence only. LLM output, if enabled, is
   validated and cannot alter rubric weights or score records.
+- When a remote OpenAI-compatible provider such as Groq or OpenRouter is enabled, bounded
+  assignment text and student source/evidence are sent to that provider for
+  Agents 1–4. Use Ollama for local-only model processing when source privacy
+  requires it; prompts treat source, assignment text and tool output as data,
+  not policy instructions, and credentials are never persisted.
 - CSV export prefixes formula-like values (`=`, `+`, `-`, `@`) to reduce
   spreadsheet formula injection risk.
 - Bubblewrap or GCC unavailability fails closed; the application does not run

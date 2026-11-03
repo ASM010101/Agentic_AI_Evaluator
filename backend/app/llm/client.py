@@ -10,7 +10,26 @@ from app.core.config import Settings
 
 
 class OllamaError(RuntimeError):
-    pass
+    def __init__(self, message: str, status_code: int | None = None):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+def _raise_for_status_with_body(response: httpx.Response, provider: str) -> None:
+    """Preserve a bounded provider diagnostic without ever including headers."""
+
+    try:
+        response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        try:
+            body = json.dumps(response.json(), ensure_ascii=True)[:2_000]
+        except (ValueError, TypeError):
+            body = getattr(response, "text", "")[:2_000]
+        detail = f": {body}" if body else ""
+        raise OllamaError(
+            f"{provider} returned HTTP {response.status_code}{detail}",
+            status_code=response.status_code,
+        ) from exc
 
 
 class OllamaClient:
@@ -51,7 +70,11 @@ class OllamaClient:
             "prompt": prompt,
             "stream": False,
             "format": "json",
-            "options": {"temperature": 0, "seed": 42},
+            "options": {
+                "temperature": 0,
+                "seed": 42,
+                "num_predict": self.settings.llm_max_output_tokens,
+            },
         }
         last_error: Exception | None = None
         async with self._semaphore:
@@ -61,7 +84,7 @@ class OllamaClient:
                         response = await client.post(
                             self.settings.ollama_base_url.rstrip("/") + "/api/generate", json=body
                         )
-                        response.raise_for_status()
+                        _raise_for_status_with_body(response, "Ollama")
                         envelope = response.json()
                         raw = envelope.get("response")
                         if not isinstance(raw, str):
@@ -92,21 +115,34 @@ class OpenAICompatibleClient:
         self.settings = settings
         self._semaphore = asyncio.Semaphore(settings.ollama_max_concurrency)
 
+    def _timeout(self) -> httpx.Timeout:
+        return httpx.Timeout(
+            connect=self.settings.openai_connect_timeout_s,
+            read=self.settings.openai_read_timeout_s,
+            write=5,
+            pool=5,
+        )
+
     def _headers(self) -> dict[str, str]:
-        return {
+        headers = {
             "Authorization": f"Bearer {self.settings.openai_api_key}",
             "Content-Type": "application/json",
         }
+        if "openrouter.ai" in self.settings.openai_base_url.lower():
+            headers.update(
+                {
+                    "HTTP-Referer": "http://127.0.0.1:5173",
+                    "X-OpenRouter-Title": "AutoGrader",
+                }
+            )
+        return headers
 
     async def health(self) -> tuple[bool, str, str | None]:
         if not self.settings.openai_api_key:
             return False, "AUTOGRADER_OPENAI_API_KEY is not set", None
-        timeout = httpx.Timeout(
-            connect=self.settings.ollama_connect_timeout_s,
-            read=self.settings.ollama_read_timeout_s,
-            write=5,
-            pool=5,
-        )
+        if not self.settings.openai_base_url.strip():
+            return False, "OpenAI-compatible LLM endpoint is not configured", None
+        timeout = self._timeout()
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
                 response = await client.get(
@@ -137,17 +173,15 @@ class OpenAICompatibleClient:
         )
 
     async def generate_json(self, prompt: str, schema_hint: dict[str, Any]) -> dict[str, Any]:
-        timeout = httpx.Timeout(
-            connect=self.settings.ollama_connect_timeout_s,
-            read=self.settings.ollama_read_timeout_s,
-            write=5,
-            pool=5,
-        )
+        if not self.settings.openai_base_url.strip():
+            raise OllamaError("OpenAI-compatible LLM endpoint is not configured")
+        timeout = self._timeout()
         system_msg = (
             "You are AutoGrader, a deterministic C programming submission evaluator. "
-            "Respond ONLY with a valid JSON object. Do not include any other text."
+            "Respond ONLY with a concise valid JSON object. Do not include chain-of-thought, "
+            "repeat the input, or include any other text."
         )
-        body = {
+        body: dict[str, Any] = {
             "model": self.settings.openai_model,
             "messages": [
                 {"role": "system", "content": system_msg},
@@ -156,9 +190,24 @@ class OpenAICompatibleClient:
             "temperature": 0,
             "response_format": {"type": "json_object"},
         }
+        if "groq.com" in self.settings.openai_base_url.lower():
+            # GPT-OSS requires an explicit reasoning format when JSON mode is
+            # enabled.  Without this, Groq rejects otherwise valid requests
+            # with HTTP 400 before the model runs.
+            body["max_completion_tokens"] = self.settings.llm_max_output_tokens
+            if self.settings.openai_model.startswith("openai/gpt-oss"):
+                body["reasoning_format"] = "hidden"
+                body["reasoning_effort"] = "low"
+        else:
+            body["max_tokens"] = self.settings.llm_max_output_tokens
+            if (
+                "nvidia.com" in self.settings.openai_base_url.lower()
+                and self.settings.openai_model.startswith("openai/gpt-oss")
+            ):
+                body["reasoning_effort"] = "low"
         last_error: Exception | None = None
         async with self._semaphore:
-            for _attempt in range(self.settings.ollama_max_retries + 1):
+            for _attempt in range(self.settings.openai_max_retries + 1):
                 try:
                     async with httpx.AsyncClient(timeout=timeout) as client:
                         response = await client.post(
@@ -166,7 +215,7 @@ class OpenAICompatibleClient:
                             headers=self._headers(),
                             json=body,
                         )
-                        response.raise_for_status()
+                        _raise_for_status_with_body(response, "LLM provider")
                         envelope = response.json()
                         choices = envelope.get("choices", [])
                         if not choices:
@@ -181,7 +230,11 @@ class OpenAICompatibleClient:
                         return parsed
                 except (httpx.HTTPError, ValueError, OllamaError) as exc:
                     last_error = exc
-        raise OllamaError(str(last_error or "LLM request failed"))
+        if last_error is None:
+            message = "LLM request failed"
+        else:
+            message = str(last_error).strip() or last_error.__class__.__name__
+        raise OllamaError(f"LLM provider request failed: {message}")
 
     def health_sync(self) -> tuple[bool, str, str | None]:
         return asyncio.run(self.health())

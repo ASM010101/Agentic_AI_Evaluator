@@ -28,7 +28,7 @@ reference solution dependency.
   operate Docker, but Docker is not required by the default Linux path.
 - Deterministic fake runner for tests and development without Docker.
 - Assignment-scoped normalized token similarity with review dispositions.
-- Optional bounded Ollama/OpenAI-compatible client; deterministic mode works without an LLM.
+- Bounded Ollama/OpenAI-compatible agent runtime; deterministic mode remains available when the LLM is disabled or unavailable.
 - Local C static-analysis evidence from Cppcheck, Flawfinder and Clang-Tidy;
   tool findings are review evidence and do not silently deduct points.
 - React + TypeScript + Vite dashboard with overview, assignment, upload/results,
@@ -49,10 +49,14 @@ logical roles:
 4. Feedback and report generation.
 5. Python coordination/state machine.
 
-The backend includes bounded Ollama and OpenAI-compatible clients plus health
-checks, but the current grading path is intentionally deterministic: scoring
-and reports do not call the model automatically. Role 5 is not an LLM worker.
-An LLM provider is therefore optional for the current dashboard demo.
+The backend includes a bounded Ollama/OpenAI-compatible runtime used by the
+four reasoning roles when `AUTOGRADER_USE_LLM=true`: Agent 1 prepares assignment
+requirements and candidate tests, Agent 2 reviews each solution, Agent 3
+explains selected deterministic similarity candidates, and Agent 4 writes
+evidence-linked feedback after deterministic scoring. Role 5 is the Python
+coordinator, not an LLM worker. Compiler execution, validated tests, similarity
+thresholds and score calculation remain deterministic authorities; model output
+is typed, persisted and advisory.
 
 ## Prerequisites
 
@@ -363,12 +367,12 @@ The backend configuration should contain:
 ```dotenv
 AUTOGRADER_OLLAMA_BASE_URL=http://127.0.0.1:11434
 AUTOGRADER_OLLAMA_MODEL=llama3.1:latest
-AUTOGRADER_USE_LLM=false
+AUTOGRADER_USE_LLM=true
 ```
 
-Keep `AUTOGRADER_USE_LLM=false` for deterministic grading. Changing it to
-`true` is safe for health-check experiments, but it does not currently change
-the deterministic grading path.
+Set `AUTOGRADER_USE_LLM=true` to run the four model-assisted roles. Set it to
+`false` for an offline deterministic run; the application records explicit
+`skipped`/fallback agent metadata rather than pretending that model reasoning ran.
 
 If Ollama Desktop is already running on Windows, do not start a second
 `ollama serve` on the same address. First test the existing service:
@@ -377,20 +381,25 @@ If Ollama Desktop is already running on Windows, do not start a second
 curl http://127.0.0.1:11434/api/tags
 ```
 
-### Optional Groq setup
+### OpenAI-compatible provider setup
 
-Groq is an OpenAI-compatible provider. It is used only for the bounded model
-client and readiness check; it does not replace GCC compilation or deterministic
-scoring. Put the credential in the ignored `backend/.env` (never in
+Groq and OpenRouter are OpenAI-compatible providers used by the four bounded
+agent roles. They do not replace GCC compilation or deterministic scoring. Put
+the credential in the ignored `backend/.env` (never in
 `.env.example` or source control):
 
 ```dotenv
 AUTOGRADER_USE_LLM=true
 AUTOGRADER_LLM_PROVIDER=openai_compatible
-AUTOGRADER_OPENAI_API_KEY=<your-groq-key>
-AUTOGRADER_OPENAI_BASE_URL=https://api.groq.com/openai/v1
+OPENROUTER_API_KEY=<your-openrouter-key>
+AUTOGRADER_OPENAI_BASE_URL=https://openrouter.ai/api/v1
 AUTOGRADER_OPENAI_MODEL=openai/gpt-oss-20b
 ```
+
+For Groq, use `AUTOGRADER_OPENAI_API_KEY`, set the base URL to
+`https://api.groq.com/openai/v1`, and keep the same model or another model
+available in your account. AutoGrader also recognizes `OPENROUTER_API_KEY` and
+`OpenRouter_API_KEY` without copying the secret into source files.
 
 Verify the provider without exposing the credential:
 
@@ -398,8 +407,10 @@ Verify the provider without exposing the credential:
 curl http://127.0.0.1:8000/api/settings/model-status
 ```
 
-If a key has ever been committed or pasted into a shared log, revoke it and
-create a replacement before continuing.
+Each model call is recorded with the agent name, provider/model, status and
+latency, while prompts and credentials are not persisted. If a key has ever
+been committed or pasted into a shared log, revoke it and create a replacement
+before continuing.
 
 ## Linux sandbox policy
 
@@ -517,9 +528,10 @@ part of the deterministic default suite. See [docs/testing.md](docs/testing.md).
 
 - **Bubblewrap unavailable:** run `bash scripts/setup_linux_sandbox.sh` on
   Debian/Ubuntu. Do not switch to host execution for untrusted submissions.
-- **Ollama unavailable/model missing:** leave `AUTOGRADER_USE_LLM=false` for
-  deterministic mode, or start Ollama with `ollama serve` and install the
-  model named in `.env`.
+- **LLM provider unavailable/model missing:** start the configured Ollama,
+  OpenRouter or Groq
+  provider, or set `AUTOGRADER_USE_LLM=false` for an offline deterministic run.
+  Agent evidence records the unavailable/skipped status either way.
 - **Port collision:** change the Uvicorn `--port` and set `VITE_API_URL` for the
   frontend if the backend is not on port 8000.
 - **Activation blocked:** inspect the assignment version preview. A material

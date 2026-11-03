@@ -27,7 +27,7 @@ flowchart TB
     ORCH --> A3
     ORCH --> A4
     ORCH --> A5
-    A1 --> LLM["Optional one-model Ollama client"]
+      A1 --> LLM["Bounded Ollama/OpenAI-compatible agent runtime"]
     A2 --> LLM
     A3 --> LLM
     A4 --> LLM
@@ -62,8 +62,10 @@ flowchart TB
 - **Sandbox adapter:** exposes a typed interface with a real Bubblewrap runner,
   an optional Docker adapter and a deterministic fake. The default Bubblewrap
   runner fails closed if the Linux namespace tool or GCC is unavailable.
-- **Evidence layer:** stores tool observations and concise reasoning with source
-  type, status, provenance and links to tests/criteria.
+- **Evidence layer:** stores tool observations and typed Agent 2/4 reasoning with
+  source type, status, provenance and links to tests/criteria. Agent 1 metadata
+  is stored on the immutable assignment spec; Agent 3 metadata is stored on
+  selected similarity findings.
 - **Scoring engine:** pure Python, no network or model calls, and no ability for
   model output to change weights or assign arbitrary points.
 - **Dashboard:** one operator-facing workspace with assignment setup, upload,

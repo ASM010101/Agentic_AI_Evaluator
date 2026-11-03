@@ -146,6 +146,7 @@ class AssignmentSpec(ApiModel):
     summary: str = ""
     provenance: dict[str, Any] = Field(default_factory=dict)
     similarity: SimilarityRuleInput = Field(default_factory=SimilarityRuleInput)
+    agent_runs: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class CreateAssignmentRequest(BaseModel):

@@ -1487,7 +1487,7 @@ pre {
 }
 .evidence-summary {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(4, 1fr);
   gap: 9px;
 }
 .evidence-summary > div {
@@ -1572,6 +1572,7 @@ pre {
   border-left-color: #ce526a;
 }
 .evidence-requires_review,
+.evidence-review_signal,
 .evidence-unavailable {
   border-left-color: #d99a30;
 }
@@ -1589,6 +1590,36 @@ pre {
   color: #35425c;
   font-size: 11px;
   line-height: 1.45;
+}
+.evidence-note {
+  display: block;
+  margin-top: 7px;
+  color: #a7772d;
+  font-size: 10px;
+}
+.evidence-output {
+  margin-top: 10px;
+  border: 1px solid #edf0f5;
+  border-radius: 5px;
+  background: #fafbfc;
+}
+.evidence-output summary {
+  padding: 8px;
+  color: #56647c;
+  cursor: pointer;
+  font-size: 10px;
+  font-weight: 700;
+}
+.evidence-output pre {
+  max-height: 230px;
+  margin: 0;
+  padding: 8px;
+  overflow: auto;
+  border-top: 1px solid #edf0f5;
+  color: #58657a;
+  font-size: 10px;
+  line-height: 1.5;
+  white-space: pre-wrap;
 }
 .evidence-id {
   display: block;

@@ -41,6 +41,7 @@ export type AssignmentSpec = {
   ambiguities: Array<{ id: string; severity: string; message: string }>;
   summary: string;
   provenance: Record<string, unknown>;
+  agent_runs?: Array<Record<string, unknown>>;
 };
 
 export type AssignmentVersion = {

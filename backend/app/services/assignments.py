@@ -7,6 +7,8 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from app.agents.assignment_agent import AssignmentUnderstandingAgent
+from app.agents.runtime import AgentRuntime
+from app.core.config import Settings
 from app.db.models import (
     Assignment,
     AssignmentVersion,
@@ -66,7 +68,11 @@ def get_version(db: Session, assignment_id: str, version_number: int) -> Assignm
 
 
 def prepare_assignment(
-    db: Session, assignment: Assignment, request: CreateAssignmentRequest | None = None
+    db: Session,
+    assignment: Assignment,
+    request: CreateAssignmentRequest | None = None,
+    settings: Settings | None = None,
+    agent_runtime: AgentRuntime | None = None,
 ) -> tuple[AssignmentVersion, list[str]]:
     if request is None:
         request = CreateAssignmentRequest(
@@ -75,6 +81,8 @@ def prepare_assignment(
             rules=assignment.rules_json,
         )
     normalized: NormalizedRules = normalize_rules(request.rules, request.problem_statement)
+    agent = AssignmentUnderstandingAgent(settings=settings, runtime=agent_runtime)
+    spec = agent.prepare(normalized, request.problem_statement)
     latest = db.scalar(
         select(func.max(AssignmentVersion.version_number)).where(
             AssignmentVersion.assignment_id == assignment.id
@@ -86,14 +94,12 @@ def prepare_assignment(
         version_number=version_number,
         problem_statement=request.problem_statement,
         rules_json=normalized.raw,
-        spec_json=normalized.spec.model_dump(mode="json"),
+        spec_json=spec.model_dump(mode="json"),
         version_hash=normalized.rules_hash,
-        status="needs_review" if normalized.spec.ambiguities else "prepared",
+        status="needs_review" if spec.ambiguities else "prepared",
     )
     db.add(version)
     db.flush()
-    agent = AssignmentUnderstandingAgent()
-    spec = agent.prepare(normalized)
     for test in spec.tests:
         db.add(
             TestCase(
@@ -120,7 +126,12 @@ def prepare_assignment(
         "assignment_version",
         version.id,
         "prepared",
-        {"version_number": version_number, "rules_hash": normalized.rules_hash},
+        {
+            "version_number": version_number,
+            "rules_hash": normalized.rules_hash,
+            "agent_1": agent.last_call.metadata() if agent.last_call else None,
+            "candidate_test_count": sum(test.status == "candidate" for test in spec.tests),
+        },
     )
     db.commit()
     db.refresh(version)

@@ -32,7 +32,7 @@ def main() -> int:
     db = new_session()
     try:
         assignment = create_assignment(db, request)
-        version, warnings = prepare_assignment(db, assignment, request)
+        version, warnings = prepare_assignment(db, assignment, request, settings)
         if warnings:
             print("Assignment needs review:")
             for warning in warnings:

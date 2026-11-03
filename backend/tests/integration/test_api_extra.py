@@ -87,8 +87,15 @@ def test_health_versions_evidence_csv_and_similarity_routes():
         assert client.get(f"/api/submissions/{submission_id}/evidence").status_code == 200
         result = client.get(f"/api/submissions/{submission_id}/results").json()
         report_id = result["report"]["id"]
-        assert client.get(f"/api/reports/{report_id}/download?format=txt").status_code == 200
-        assert client.get(f"/api/reports/{report_id}/download?format=json").status_code == 200
+        text_report = client.get(f"/api/reports/{report_id}/download?format=txt")
+        assert text_report.status_code == 200
+        assert "Assignment:       Routes" in text_report.text
+        assert "Submission file:  routes.c" in text_report.text
+        assert "VALIDATED TEST RESULTS" in text_report.text
+        json_report = client.get(f"/api/reports/{report_id}/download?format=json")
+        assert json_report.status_code == 200
+        assert json_report.json()["assignment"]["name"] == "Routes"
+        assert json_report.json()["student_report"]
         export = client.get(f"/api/batches/{batch_id}/export.csv")
         assert export.status_code == 200
         assert "routes.c" in export.text
@@ -150,7 +157,8 @@ def test_similarity_flags_identical_sources_with_different_filenames():
         evidence = client.get(f"/api/submissions/{submissions[0]['id']}/evidence").json()
         similarity_evidence = [item for item in evidence if item["source_type"] == "similarity"]
         assert len(similarity_evidence) == 1
-        assert similarity_evidence[0]["status"] == "requires_review"
+        assert similarity_evidence[0]["status"] == "review_signal"
+        assert similarity_evidence[0]["details"]["scoring_impact"] is False
 
         export = client.get(f"/api/batches/{batch_payload['id']}/export.csv")
         assert export.status_code == 200

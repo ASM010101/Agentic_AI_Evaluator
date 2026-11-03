@@ -5,7 +5,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, model_validator
+from pydantic import AliasChoices, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -22,6 +22,7 @@ class Settings(BaseSettings):
         env_prefix="AUTOGRADER_",
         case_sensitive=False,
         extra="ignore",
+        populate_by_name=True,
     )
 
     app_name: str = "AutoGrader"
@@ -48,12 +49,28 @@ class Settings(BaseSettings):
     ollama_read_timeout_s: float = Field(default=45.0, gt=0, le=600)
     ollama_max_retries: int = Field(default=1, ge=0, le=3)
     ollama_max_concurrency: int = Field(default=1, gt=0, le=8)
+    openai_connect_timeout_s: float = Field(default=2.0, gt=0, le=30)
+    openai_read_timeout_s: float = Field(default=30.0, gt=0, le=600)
+    openai_max_retries: int = Field(default=0, ge=0, le=3)
+    llm_max_output_tokens: int = Field(default=900, ge=128, le=8_000)
     use_llm: bool = False
 
     # OpenAI-compatible provider (Groq, OpenRouter, NVIDIA NIM, etc.)
     llm_provider: Literal["ollama", "openai_compatible"] = "ollama"
-    openai_api_key: str = ""
-    openai_base_url: str = "https://api.groq.com/openai/v1"
+    openai_api_key: str = Field(
+        default="",
+        validation_alias=AliasChoices(
+            "AUTOGRADER_OPENAI_API_KEY",
+            "OPENROUTER_API_KEY",
+            "OpenRouter_API_KEY",
+            "NVIDIA_API_KEY",
+            "GROQ_API_KEY",
+            "OPENAI_API_KEY",
+        ),
+    )
+    # An OpenAI-compatible endpoint must be explicitly selected. Do not silently
+    # route a key for one provider to a different provider's default endpoint.
+    openai_base_url: str = ""
     openai_model: str = "openai/gpt-oss-20b"
 
     compiler_standard: str = "c11"
@@ -64,6 +81,9 @@ class Settings(BaseSettings):
         if not self.openai_api_key:
             env_key = (
                 os.getenv("AUTOGRADER_OPENAI_API_KEY")
+                or os.getenv("OPENROUTER_API_KEY")
+                or os.getenv("OpenRouter_API_KEY")
+                or os.getenv("NVIDIA_API_KEY")
                 or os.getenv("GROQ_API_KEY")
                 or os.getenv("Groq_API_Key")
                 or os.getenv("OPENAI_API_KEY")
