@@ -4,6 +4,7 @@ import type {
   Assignment,
   AssignmentVersion,
   BatchLive,
+  Batch,
   Dependency,
   Evaluation,
   Evidence,
@@ -58,6 +59,10 @@ const exampleRules = JSON.stringify(
         scoring: { mode: "evidence_score" },
       },
     ],
+    similarity: {
+      enabled: true,
+      flag_threshold: 0.85,
+    },
     tests: [
       {
         id: "sample",
@@ -96,7 +101,7 @@ function Badge({ value }: { value: string }): ReactElement {
   const tone =
     value.includes("fail") || value === "failed"
       ? "danger"
-      : value.includes("review")
+      : value.includes("review") || value.includes("flag") || value.includes("similarity")
         ? "warning"
         : value === "completed" || value === "active" || value === "pass"
           ? "success"
@@ -119,6 +124,15 @@ const pipelineStages = [
 function formatTime(value: string | null | undefined): string {
   if (!value) return "—";
   return new Date(value).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+function readTextFile(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result ?? ""));
+    reader.onerror = () => reject(new Error("Could not read the selected file."));
+    reader.readAsText(file);
+  });
 }
 
 function stagePosition(run: LiveEvaluation): number {
@@ -507,6 +521,23 @@ function AssignmentsPage(): ReactElement {
         .catch((reason: Error) => setError(reason.message)),
     [],
   );
+  const importRules = async (file: File | undefined): Promise<void> => {
+    if (!file) return;
+    setError(null);
+    try {
+      if (!file.name.toLowerCase().endsWith(".json")) {
+        throw new Error("Choose a .json rules file.");
+      }
+      const parsed: unknown = JSON.parse(await readTextFile(file));
+      if (!parsed || Array.isArray(parsed) || typeof parsed !== "object") {
+        throw new Error("The rules file must contain a JSON object.");
+      }
+      setRulesText(JSON.stringify(parsed, null, 2));
+      setMessage(`Loaded ${file.name}. Review or edit the rules before saving.`);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not load the JSON rules file");
+    }
+  };
   useEffect(() => {
     void load();
   }, [load]);
@@ -563,6 +594,17 @@ function AssignmentsPage(): ReactElement {
       setError(reason instanceof Error ? reason.message : "Could not activate version");
     }
   };
+  const removeVersion = async (version: AssignmentVersion): Promise<void> => {
+    setError(null);
+    try {
+      await api.deleteVersion(version.assignment_id, version.version_number);
+      setMessage(`Deleted version ${version.version_number}.`);
+      await selectAssignment(version.assignment_id);
+      await load();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not delete version");
+    }
+  };
   return (
     <div className="page-stack">
       <div className="page-title-row">
@@ -604,6 +646,19 @@ function AssignmentsPage(): ReactElement {
                 spellCheck={false}
               />
             </label>
+            <div className="rule-file-tools">
+              <label className="file-drop compact-file-drop">
+                Upload JSON rules
+                <input
+                  aria-label="Upload JSON rules"
+                  type="file"
+                  accept=".json,application/json"
+                  onChange={(event) => void importRules(event.target.files?.[0])}
+                />
+                <span>Choose a file to replace the editor contents.</span>
+              </label>
+              <small>Edit the imported JSON directly before creating or preparing a version.</small>
+            </div>
             <button className="button button-primary" onClick={() => void create()}>
               Create and prepare <span>→</span>
             </button>
@@ -659,12 +714,20 @@ function AssignmentsPage(): ReactElement {
                     </div>
                     <div className="version-actions">
                       <Badge value={version.status} />
-                      {version.status === "prepared" && (
+                      {version.status !== "active" && (
                         <button
                           className="button button-small"
                           onClick={() => void activate(version)}
                         >
-                          Activate
+                          {version.status === "superseded" ? "Reactivate" : "Activate"}
+                        </button>
+                      )}
+                      {version.status !== "active" && (
+                        <button
+                          className="button button-small version-delete"
+                          onClick={() => void removeVersion(version)}
+                        >
+                          Delete
                         </button>
                       )}
                     </div>
@@ -703,11 +766,8 @@ function SubmissionsPage({ detailId }: { detailId?: string }): ReactElement {
   const [assignmentId, setAssignmentId] = useState("");
   const [versionNumber, setVersionNumber] = useState("");
   const [files, setFiles] = useState<File[]>([]);
-  const [batch, setBatch] = useState<{
-    id: string;
-    status: string;
-    summary: Record<string, unknown>;
-  } | null>(null);
+  const [batch, setBatch] = useState<Batch | null>(null);
+  const [batchHistory, setBatchHistory] = useState<Batch[]>([]);
   const [live, setLive] = useState<BatchLive | null>(null);
   const [submissions, setSubmissions] = useState<Submission[]>([]);
   const [evaluations, setEvaluations] = useState<Evaluation[]>([]);
@@ -730,13 +790,21 @@ function SubmissionsPage({ detailId }: { detailId?: string }): ReactElement {
       .assignment(assignmentId)
       .then((result) => {
         setVersions(result.versions);
+        const batchVersion = result.versions.find(
+          (version) => version.id === batch?.assignment_version_id,
+        );
         const active = result.versions.find((version) => version.status === "active");
         setVersionNumber(
-          String(active?.version_number ?? result.versions[0]?.version_number ?? ""),
+          String(
+            batchVersion?.version_number ??
+              active?.version_number ??
+              result.versions[0]?.version_number ??
+              "",
+          ),
         );
       })
       .catch((reason: Error) => setError(reason.message));
-  }, [assignmentId]);
+  }, [assignmentId, batch?.assignment_version_id]);
   const batchId = batch?.id;
   const refresh = useCallback(async (): Promise<void> => {
     if (!batchId) return;
@@ -748,6 +816,9 @@ function SubmissionsPage({ detailId }: { detailId?: string }): ReactElement {
       ]);
       setLive(nextLive);
       setBatch(nextLive.batch);
+      setBatchHistory((current) =>
+        current.map((item) => (item.id === nextLive.batch.id ? nextLive.batch : item)),
+      );
       setSubmissions(nextSubmissions);
       setEvaluations(
         nextEvaluations.filter((item) =>
@@ -765,6 +836,102 @@ function SubmissionsPage({ detailId }: { detailId?: string }): ReactElement {
     }, 1000);
     return () => window.clearInterval(timer);
   }, [batchId, live, refresh]);
+  const addFiles = (selectedFiles: FileList | null): void => {
+    const incoming = Array.from(selectedFiles ?? []);
+    if (incoming.length === 0) return;
+    const selectedNames = new Set(files.map((file) => file.name));
+    const accepted: File[] = [];
+    const invalid: string[] = [];
+    const duplicates: string[] = [];
+    for (const file of incoming) {
+      if (!file.name.toLowerCase().endsWith(".c")) {
+        invalid.push(file.name);
+      } else if (selectedNames.has(file.name)) {
+        duplicates.push(file.name);
+      } else {
+        selectedNames.add(file.name);
+        accepted.push(file);
+      }
+    }
+    const problems = [
+      invalid.length ? `Not C source files: ${invalid.join(", ")}` : "",
+      duplicates.length ? `Already selected: ${duplicates.join(", ")}` : "",
+    ].filter(Boolean);
+    setError(problems.length ? problems.join(". ") : null);
+    if (accepted.length > 0) {
+      setFiles((current) => [...current, ...accepted]);
+    }
+  };
+  const removeFile = (name: string): void => {
+    setFiles((current) => current.filter((file) => file.name !== name));
+  };
+  const loadBatch = useCallback(async (nextBatch: Batch): Promise<void> => {
+    setBatch(nextBatch);
+    setFiles([]);
+    if (nextBatch.assignment_id) setAssignmentId(nextBatch.assignment_id);
+    if (nextBatch.version_number != null) setVersionNumber(String(nextBatch.version_number));
+    const [nextSubmissions, nextLive, nextEvaluations] = await Promise.all([
+      api.batchSubmissions(nextBatch.id),
+      api.batchLive(nextBatch.id),
+      api.evaluations(),
+    ]);
+    setSubmissions(nextSubmissions);
+    setLive(nextLive);
+    setEvaluations(
+      nextEvaluations.filter((item) =>
+        nextSubmissions.some((submission) => submission.id === item.submission_id),
+      ),
+    );
+  }, []);
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .batches()
+      .then((result) => {
+        if (cancelled) return;
+        const persistedBatches = Array.isArray(result) ? result : [];
+        setBatchHistory(persistedBatches);
+        if (persistedBatches[0]) {
+          void loadBatch(persistedBatches[0]).catch((reason: Error) => {
+            if (!cancelled) setError(reason.message);
+          });
+        }
+      })
+      .catch((reason: Error) => {
+        if (!cancelled) setError(reason.message);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [loadBatch]);
+  const selectBatch = async (id: string): Promise<void> => {
+    if (!id) {
+      setBatch(null);
+      setLive(null);
+      setSubmissions([]);
+      setEvaluations([]);
+      setFiles([]);
+      setError(null);
+      return;
+    }
+    const selectedBatch = batchHistory.find((item) => item.id === id);
+    if (!selectedBatch) return;
+    setError(null);
+    try {
+      await loadBatch(selectedBatch);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not load the selected batch");
+    }
+  };
+  const createBatch = async (): Promise<void> => {
+    const nextBatch = await api.createBatch(assignmentId, Number(versionNumber), files);
+    setFiles([]);
+    setBatchHistory((current) => [
+      nextBatch,
+      ...current.filter((item) => item.id !== nextBatch.id),
+    ]);
+    await loadBatch(nextBatch);
+  };
   const upload = async (): Promise<void> => {
     setError(null);
     if (!assignmentId || !versionNumber || files.length === 0) {
@@ -772,18 +939,40 @@ function SubmissionsPage({ detailId }: { detailId?: string }): ReactElement {
       return;
     }
     try {
-      const nextBatch = await api.createBatch(assignmentId, Number(versionNumber), files);
-      setBatch(nextBatch);
-      const [nextSubmissions, nextLive] = await Promise.all([
-        api.batchSubmissions(nextBatch.id),
-        api.batchLive(nextBatch.id),
-      ]);
-      setSubmissions(nextSubmissions);
-      setLive(nextLive);
+      if (!batch) {
+        await createBatch();
+        return;
+      }
+      const selectedVersion = versions.find(
+        (version) => version.version_number === Number(versionNumber),
+      );
+      if (!selectedVersion || selectedVersion.id !== batch.assignment_version_id) {
+        setError("Select the assignment version used by the current batch before adding files.");
+        return;
+      }
+      const added = await api.appendBatch(batch.id, files);
+      setFiles([]);
+      await refresh();
+      if (added.length > 0) {
+        setError(null);
+      }
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Could not upload batch");
     }
   };
+  const createSeparateBatch = async (): Promise<void> => {
+    setError(null);
+    if (!assignmentId || !versionNumber || files.length === 0) {
+      setError("Choose an assignment version and at least one .c file.");
+      return;
+    }
+    try {
+      await createBatch();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not create batch");
+    }
+  };
+  const batchBusy = batch?.status === "queued" || batch?.status === "evaluating";
   const evaluate = async (): Promise<void> => {
     if (!batch) return;
     try {
@@ -822,6 +1011,21 @@ function SubmissionsPage({ detailId }: { detailId?: string }): ReactElement {
         </div>
         <div className="upload-grid">
           <label>
+            Saved batch
+            <select
+              value={batch?.id ?? ""}
+              onChange={(event) => void selectBatch(event.target.value)}
+            >
+              <option value="">Start a new batch</option>
+              {batchHistory.map((savedBatch) => (
+                <option key={savedBatch.id} value={savedBatch.id}>
+                  {savedBatch.id.slice(0, 8)} · {savedBatch.status} ·{" "}
+                  {new Date(savedBatch.created_at).toLocaleString()}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
             Assignment
             <select value={assignmentId} onChange={(event) => setAssignmentId(event.target.value)}>
               <option value="">Select assignment</option>
@@ -846,22 +1050,45 @@ function SubmissionsPage({ detailId }: { detailId?: string }): ReactElement {
               ))}
             </select>
           </label>
-          <label className="file-drop">
-            C source files
+          <label className={`file-drop ${batchBusy ? "file-drop-disabled" : ""}`}>
+            {batch ? "Add C source files" : "C source files"}
             <input
               type="file"
               accept=".c,text/x-c"
               multiple
-              onChange={(event) => setFiles(Array.from(event.target.files ?? []))}
+              disabled={batchBusy}
+              onChange={(event) => {
+                addFiles(event.currentTarget.files);
+                event.currentTarget.value = "";
+              }}
             />
             <span>
-              {files.length ? `${files.length} file(s) selected` : "Drop files here or browse"}
+              {files.length
+                ? `${files.length} file(s) waiting to upload`
+                : batch
+                  ? batchBusy
+                    ? "Adding files is available when evaluation finishes"
+                    : "Select more files to add to this batch"
+                  : "Drop files here or browse"}
             </span>
           </label>
           <div className="upload-actions">
-            <button className="button button-primary" onClick={() => void upload()}>
-              Create batch
+            <button
+              className="button button-primary"
+              onClick={() => void upload()}
+              disabled={batchBusy}
+            >
+              {batch ? "Add to current batch" : "Create batch"}
             </button>
+            {batch && (
+              <button
+                className="button button-secondary"
+                onClick={() => void createSeparateBatch()}
+                disabled={files.length === 0}
+              >
+                Create separate batch
+              </button>
+            )}
             {batch && (
               <button
                 className="button button-secondary"
@@ -877,8 +1104,16 @@ function SubmissionsPage({ detailId }: { detailId?: string }): ReactElement {
           <div className="file-chips">
             {files.map((file) => (
               <span key={`${file.name}-${file.size}`} className="file-chip">
-                {file.name}
+                <span>{file.name}</span>
                 <small>{Math.ceil(file.size / 1024)} KB</small>
+                <button
+                  type="button"
+                  className="file-chip-remove"
+                  aria-label={`Remove ${file.name}`}
+                  onClick={() => removeFile(file.name)}
+                >
+                  ×
+                </button>
               </span>
             ))}
           </div>
@@ -931,7 +1166,15 @@ function SubmissionsPage({ detailId }: { detailId?: string }): ReactElement {
                         </small>
                       </td>
                       <td>
-                        <Badge value={submission.status} />
+                        <div className="status-stack">
+                          <Badge value={submission.status} />
+                          {submission.similarity_flagged && <Badge value="similarity flagged" />}
+                        </div>
+                        {submission.similarity_score != null && (
+                          <small className="status-note">
+                            {(submission.similarity_score * 100).toFixed(1)}% match
+                          </small>
+                        )}
                       </td>
                       <td>
                         {evaluation ? (

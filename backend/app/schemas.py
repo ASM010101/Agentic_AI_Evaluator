@@ -47,6 +47,15 @@ class ScoringRuleInput(BaseModel):
     max_points: float = Field(default=100.0, gt=0)
 
 
+class SimilarityRuleInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # Similarity is a mandatory review check. It is deliberately not a rubric
+    # criterion and cannot be disabled through assignment JSON.
+    enabled: Literal[True] = True
+    flag_threshold: float = Field(default=0.85, gt=0, le=1)
+
+
 class MetricRuleInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -81,6 +90,7 @@ class RulesDocument(BaseModel):
     comparison: dict[str, Any] = Field(default_factory=lambda: {"mode": "trim_trailing_whitespace"})
     execution: dict[str, Any] = Field(default_factory=dict)
     scoring: dict[str, Any] = Field(default_factory=dict)
+    similarity: SimilarityRuleInput = Field(default_factory=SimilarityRuleInput)
 
     @model_validator(mode="after")
     def has_rubric(self) -> "RulesDocument":
@@ -135,6 +145,7 @@ class AssignmentSpec(ApiModel):
     ambiguities: list[dict[str, Any]] = Field(default_factory=list)
     summary: str = ""
     provenance: dict[str, Any] = Field(default_factory=dict)
+    similarity: SimilarityRuleInput = Field(default_factory=SimilarityRuleInput)
 
 
 class CreateAssignmentRequest(BaseModel):
@@ -174,7 +185,9 @@ class PrepareResponse(ApiModel):
 
 class BatchSummary(ApiModel):
     id: str
+    assignment_id: str | None = None
     assignment_version_id: str
+    version_number: int | None = None
     status: str
     summary: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime
@@ -236,6 +249,8 @@ class SubmissionSummary(ApiModel):
     content_hash: str
     source_size: int
     status: str
+    similarity_flagged: bool = False
+    similarity_score: float | None = None
     created_at: datetime
 
 

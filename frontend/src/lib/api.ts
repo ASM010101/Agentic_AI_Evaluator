@@ -17,12 +17,19 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_URL}${path}`, init);
   if (!response.ok) {
     const payload = (await response.json().catch(() => null)) as { detail?: unknown } | null;
+    const rawDetail = payload?.detail;
     const detail =
-      typeof payload?.detail === "string"
-        ? payload.detail
-        : JSON.stringify(payload?.detail ?? response.statusText);
+      typeof rawDetail === "string"
+        ? rawDetail
+        : rawDetail &&
+            typeof rawDetail === "object" &&
+            "message" in rawDetail &&
+            typeof rawDetail.message === "string"
+          ? rawDetail.message
+          : JSON.stringify(rawDetail ?? response.statusText);
     throw new Error(detail);
   }
+  if (response.status === 204) return undefined as T;
   return (await response.json()) as T;
 }
 
@@ -66,12 +73,23 @@ export const api = {
     request<AssignmentVersion>(`/assignments/${id}/versions/${version}/activate`, {
       method: "POST",
     }),
+  deleteVersion: (id: string, version: number) =>
+    request<void>(`/assignments/${id}/versions/${version}`, { method: "DELETE" }),
   createBatch: async (assignmentId: string, version: number, files: File[]) => {
     const form = new FormData();
     form.append("version_number", String(version));
     files.forEach((file) => form.append("files", file));
     return request<Batch>(`/assignments/${assignmentId}/batches`, { method: "POST", body: form });
   },
+  appendBatch: async (batchId: string, files: File[]) => {
+    const form = new FormData();
+    files.forEach((file) => form.append("files", file));
+    return request<Submission[]>(`/batches/${batchId}/submissions`, {
+      method: "POST",
+      body: form,
+    });
+  },
+  batches: () => request<Batch[]>("/batches"),
   batchSubmissions: (id: string) => request<Submission[]>(`/batches/${id}/submissions`),
   evaluate: (id: string) => request<Evaluation[]>(`/batches/${id}/evaluate`, { method: "POST" }),
   batch: (id: string) => request<Batch>(`/batches/${id}`),

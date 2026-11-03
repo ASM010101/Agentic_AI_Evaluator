@@ -21,7 +21,7 @@ def main() -> int:
         help="JSON file containing name, problem_statement and rules",
     )
     parser.add_argument("--submission", type=Path, action="append", required=True)
-    parser.add_argument("--runner", choices=["docker", "fake"], default=None)
+    parser.add_argument("--runner", choices=["bubblewrap", "docker", "fake"], default=None)
     args = parser.parse_args()
     settings = get_settings()
     if args.runner:

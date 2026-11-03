@@ -424,6 +424,20 @@ h1 {
   border-color: #b8c2d3;
   background: #f7f8fb;
 }
+.version-delete {
+  color: #a44b5c;
+}
+.status-stack {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+.status-note {
+  display: block;
+  margin-top: 5px;
+  color: #a7772d;
+  font-size: 10px;
+}
 .stat-grid {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
@@ -664,6 +678,20 @@ pre {
   background: #fbfcff;
   font-size: 11px;
 }
+.rule-file-tools {
+  display: grid;
+  gap: 6px;
+}
+.compact-file-drop {
+  min-height: 64px;
+}
+.compact-file-drop span {
+  padding-top: 8px;
+}
+.rule-file-tools > small {
+  color: #8290a4;
+  font-size: 10px;
+}
 .form-grid > .button {
   justify-self: start;
 }
@@ -830,6 +858,9 @@ pre {
   border-radius: 8px;
   background: #fbfcff;
 }
+.file-drop-disabled {
+  opacity: 0.65;
+}
 .file-drop input {
   position: absolute;
   inset: 0;
@@ -868,6 +899,24 @@ pre {
 }
 .file-chip small {
   color: #9aa5b5;
+}
+.file-chip-remove {
+  display: inline-flex;
+  width: 18px;
+  height: 18px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  color: #8c98a9;
+  background: transparent;
+  font-size: 15px;
+  line-height: 1;
+}
+.file-chip-remove:hover {
+  color: #a44b5c;
+  background: #f0e5e8;
 }
 .table-wrap {
   overflow-x: auto;

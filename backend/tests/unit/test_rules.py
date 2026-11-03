@@ -36,6 +36,8 @@ def test_normalizes_rules_and_hash_is_stable():
     assert first.rules_hash == second.rules_hash
     assert first.spec.criteria[0].id == "correctness"
     assert first.spec.tests[0].status == "validated"
+    assert first.raw["similarity"] == {"enabled": True, "flag_threshold": 0.85}
+    assert first.spec.similarity.flag_threshold == 0.85
     assert can_activate(first.spec)[0] is True
 
 
@@ -46,6 +48,14 @@ def test_unvalidated_score_affecting_test_blocks_activation():
     allowed, warnings = can_activate(normalized.spec)
     assert allowed is False
     assert any("cannot affect a grade" in warning for warning in warnings)
+
+
+def test_similarity_threshold_is_preserved_in_normalized_spec():
+    rules = valid_rules()
+    rules["similarity"] = {"enabled": True, "flag_threshold": 0.92}
+    normalized = normalize_rules(rules, "problem")
+    assert normalized.raw["similarity"]["flag_threshold"] == 0.92
+    assert normalized.spec.similarity.flag_threshold == 0.92
 
 
 def test_weights_must_sum_to_one():

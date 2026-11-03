@@ -72,6 +72,8 @@ const submission = {
   content_hash: "abcdef1234567890",
   source_size: 33,
   status: "completed",
+  similarity_flagged: true,
+  similarity_score: 1,
   created_at: "2026-10-24T00:00:00Z",
 };
 const batch = {
@@ -199,6 +201,7 @@ function jsonResponse(payload: unknown, ok = true): Response {
 describe("dashboard workflows", () => {
   beforeEach(() => {
     window.location.hash = "#/overview";
+    let savedBatches: (typeof batch)[] = [];
     vi.stubGlobal(
       "fetch",
       vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
@@ -232,6 +235,8 @@ describe("dashboard workflows", () => {
           );
         if (url.includes("/batches/batch-1/submissions"))
           return Promise.resolve(jsonResponse([submission]));
+        if (url.endsWith("/batches") && method === "GET")
+          return Promise.resolve(jsonResponse(savedBatches));
         if (url.endsWith("/batches/batch-1/live")) return Promise.resolve(jsonResponse(live));
         if (url.includes("/batches/batch-1/evaluate"))
           return Promise.resolve(jsonResponse([evaluation]));
@@ -252,8 +257,10 @@ describe("dashboard workflows", () => {
               disposition: "benign_similarity",
             }),
           );
-        if (url.includes("/assignments/assignment-1/batches"))
+        if (url.includes("/assignments/assignment-1/batches")) {
+          savedBatches = [batch];
           return Promise.resolve(jsonResponse(batch));
+        }
         if (url.endsWith("/health")) return Promise.resolve(jsonResponse({ status: "ok" }));
         return Promise.resolve(jsonResponse({}));
       }),
@@ -270,6 +277,12 @@ describe("dashboard workflows", () => {
     expect(await screen.findByRole("heading", { name: "Assignments" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /Demo assignment/ }));
     await waitFor(() => expect(screen.getByText("Version 1")).toBeInTheDocument());
+    fireEvent.change(screen.getByLabelText("Upload JSON rules"), {
+      target: {
+        files: [new File(['{"metrics": []}'], "rules.json", { type: "application/json" })],
+      },
+    });
+    await waitFor(() => expect(screen.getByDisplayValue(/"metrics"/)).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: /Prepare new version/ }));
     fireEvent.click(screen.getByRole("button", { name: /Activate/ }));
 
@@ -284,12 +297,39 @@ describe("dashboard workflows", () => {
     fireEvent.change(fileInput, {
       target: { files: [new File(["int main(void) {}"], "correct.c", { type: "text/plain" })] },
     });
+    fireEvent.change(fileInput, {
+      target: {
+        files: [new File(["int main(void) { return 1; }"], "extra.c", { type: "text/plain" })],
+      },
+    });
+    expect(screen.getByText("correct.c")).toBeInTheDocument();
+    expect(screen.getByText("extra.c")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Remove extra.c" }));
+    expect(screen.queryByText("extra.c")).not.toBeInTheDocument();
+    fireEvent.change(fileInput, {
+      target: {
+        files: [new File(["int main(void) { return 1; }"], "extra.c", { type: "text/plain" })],
+      },
+    });
     fireEvent.click(screen.getByRole("button", { name: "Create batch" }));
-    expect(await screen.findByText("correct.c")).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Add to current batch" })).toBeInTheDocument();
+    expect(screen.getAllByText("correct.c").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByText("similarity flagged")).toBeInTheDocument();
+    fireEvent.change(fileInput, {
+      target: {
+        files: [new File(["int main(void) { return 2; }"], "late.c", { type: "text/plain" })],
+      },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Add to current batch" }));
     fireEvent.click(screen.getByRole("button", { name: /Evaluate batch/ }));
     expect(await screen.findByRole("button", { name: "Inspect" })).toBeInTheDocument();
     expect(await screen.findByText("Live evaluation monitor")).toBeInTheDocument();
     expect(screen.getByText("Review the results")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /Similarity Review/ }));
+    expect(await screen.findByRole("heading", { name: "Similarity Review" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /Submissions & Results/ }));
+    expect(await screen.findByText("BATCH batch-1")).toBeInTheDocument();
+    expect(screen.getAllByText("correct.c").length).toBeGreaterThanOrEqual(1);
     fireEvent.click(screen.getByRole("button", { name: "Inspect" }));
     expect(await screen.findByRole("heading", { name: "correct.c" })).toBeInTheDocument();
     expect(screen.getByText("Test sample failed.")).toBeInTheDocument();

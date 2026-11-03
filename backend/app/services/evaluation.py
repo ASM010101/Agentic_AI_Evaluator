@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, or_, select
 from sqlalchemy.orm import Session
 
 from app.agents.report_agent import build_report, render_text
@@ -234,6 +234,17 @@ def _criterion_for_test(spec: AssignmentSpec) -> list[NormalizedCriterion]:
     ]
 
 
+def _compile_diagnostic(result: CompileResult) -> str:
+    """Return a bounded, useful compiler diagnostic for operators and reports."""
+
+    diagnostic = result.stderr.strip() or result.stdout.strip()
+    if result.error and result.error not in diagnostic:
+        diagnostic = f"{diagnostic} ({result.error})" if diagnostic else result.error
+    if not diagnostic:
+        diagnostic = "no compiler diagnostic was returned"
+    return f"student source did not compile: {diagnostic}"[:4000]
+
+
 def _add_compile_evidence(
     db: Session,
     run: EvaluationRun,
@@ -267,7 +278,7 @@ def _add_compile_evidence(
     else:
         status = "fail"
         score = 0.0
-        summary = "Compilation failed."
+        summary = _compile_diagnostic(result)
     _evidence(
         db,
         run,
@@ -443,50 +454,43 @@ def _add_similarity_evidence(
     run: EvaluationRun,
     version: AssignmentVersion,
     submission: Submission,
-    spec: AssignmentSpec,
     flagged: bool,
     score: float | None,
 ) -> None:
-    for criterion in spec.criteria:
-        if criterion.analyzer not in {"similarity_flag", "originality"}:
-            continue
-        # Similarity flags never reduce the score automatically. A clean
-        # comparison is a pass; a flagged comparison remains review evidence.
-        _evidence(
-            db,
-            run,
-            version,
-            submission,
-            source_type="similarity",
-            status="requires_review" if flagged else "pass",
-            summary=(
-                f"Potential assignment-scoped overlap detected (maximum similarity {score:.3f})."
-                if flagged and score is not None
-                else "No assignment-scoped similarity candidate exceeded the configured threshold."
-            ),
-            criterion_id=criterion.id,
-            details={"normalized_score": 1.0, "flagged": flagged, "maximum_similarity": score},
-            provenance={"method": "normalized_token_sequence_v1", "deducts_points": False},
-        )
+    # Similarity is always recorded as review-only evidence. It is intentionally
+    # not attached to a scoring criterion and can never change a grade.
+    _evidence(
+        db,
+        run,
+        version,
+        submission,
+        source_type="similarity",
+        status="requires_review" if flagged else "pass",
+        summary=(
+            f"Potential assignment-scoped overlap detected (maximum similarity {score:.3f})."
+            if flagged and score is not None
+            else "No assignment-scoped similarity candidate exceeded the configured threshold."
+        ),
+        details={"flagged": flagged, "maximum_similarity": score},
+        provenance={"method": "normalized_token_sequence_v1", "deducts_points": False},
+    )
 
 
 def compare_batch_similarity(
     db: Session, batch: SubmissionBatch, version: AssignmentVersion
 ) -> None:
     submissions = db.scalars(select(Submission).where(Submission.batch_id == batch.id)).all()
-    criterion = next(
-        (
-            item
-            for item in AssignmentSpec.model_validate(version.spec_json).criteria
-            if item.analyzer in {"similarity_flag", "originality"}
-        ),
-        None,
-    )
-    if criterion is None:
-        return
-    threshold = float(criterion.params.get("flag_threshold", 0.85))
+    spec = AssignmentSpec.model_validate(version.spec_json)
+    threshold = spec.similarity.flag_threshold
+    submission_ids = [submission.id for submission in submissions]
     db.execute(
-        delete(SimilarityFinding).where(SimilarityFinding.assignment_version_id == version.id)
+        delete(SimilarityFinding).where(
+            SimilarityFinding.assignment_version_id == version.id,
+            or_(
+                SimilarityFinding.left_submission_id.in_(submission_ids),
+                SimilarityFinding.right_submission_id.in_(submission_ids),
+            ),
+        )
     )
     for index, left in enumerate(submissions):
         for right in submissions[index + 1 :]:
@@ -569,7 +573,12 @@ class EvaluationCoordinator:
                         "runner": self.settings.runner,
                         "docker_image": self.settings.docker_image,
                         "compiler_flags": list(self.settings.compiler_flags),
-                        "ollama_model": self.settings.ollama_model,
+                        "llm_provider": self.settings.llm_provider,
+                        "llm_model": (
+                            self.settings.openai_model
+                            if self.settings.llm_provider == "openai_compatible"
+                            else self.settings.ollama_model
+                        ),
                     },
                 )
                 if existing is None:
@@ -617,6 +626,12 @@ class EvaluationCoordinator:
             if not submission or not version:
                 raise RuntimeError("submission or assignment version is missing")
             spec = AssignmentSpec.model_validate(version.spec_json)
+            # Similarity is a mandatory batch-level check, but it is also
+            # attached to every individual run so failed compilations retain
+            # the same review evidence as successful runs.
+            flagged, similarity_score = _similarity_for_submission(db, submission.id)
+            _add_similarity_evidence(db, run, version, submission, flagged, similarity_score)
+            db.commit()
             _set_state(
                 db,
                 run,
@@ -650,11 +665,21 @@ class EvaluationCoordinator:
                 db.commit()
                 return
             if not compile_result.compiled:
-                run.error_summary = "student source did not compile"
+                run.error_summary = _compile_diagnostic(compile_result)
                 run.state = transition(run.state, RunState.FAILED)
                 run.current_stage = "compile_failed"
                 run.completed_at = utcnow()
                 submission.status = "failed"
+                _audit(
+                    db,
+                    "evaluation_run",
+                    run.id,
+                    "failed",
+                    {
+                        "reason": run.error_summary,
+                        "exit_code": compile_result.exit_code,
+                    },
+                )
                 db.commit()
                 return
 
@@ -867,8 +892,6 @@ class EvaluationCoordinator:
                         },
                         provenance={"tool": "addresssanitizer_undefinedbehaviorsanitizer"},
                     )
-            flagged, similarity_score = _similarity_for_submission(db, submission.id)
-            _add_similarity_evidence(db, run, version, submission, spec, flagged, similarity_score)
             db.commit()
 
             _set_state(

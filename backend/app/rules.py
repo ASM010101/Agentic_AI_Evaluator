@@ -194,8 +194,16 @@ def normalize_rules(raw: dict[str, Any], problem_statement: str) -> NormalizedRu
             f"{len(ambiguities)} material review item(s) remain."
         ),
         provenance={"method": "deterministic_rules_normalizer", "schema_version": "1.0"},
+        similarity=document.similarity,
     )
-    return NormalizedRules(raw=raw, document=document, spec=spec, rules_hash=canonical_hash(raw))
+    normalized_raw = dict(raw)
+    normalized_raw["similarity"] = document.similarity.model_dump(mode="json")
+    return NormalizedRules(
+        raw=normalized_raw,
+        document=document,
+        spec=spec,
+        rules_hash=canonical_hash(normalized_raw),
+    )
 
 
 def activation_warnings(spec: AssignmentSpec) -> list[str]:

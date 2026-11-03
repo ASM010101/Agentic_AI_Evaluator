@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import os
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -17,7 +18,7 @@ class Settings(BaseSettings):
     """
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=(".env", "../.env", "backend/.env"),
         env_prefix="AUTOGRADER_",
         case_sensitive=False,
         extra="ignore",
@@ -49,8 +50,31 @@ class Settings(BaseSettings):
     ollama_max_concurrency: int = Field(default=1, gt=0, le=8)
     use_llm: bool = False
 
+    # OpenAI-compatible provider (Groq, OpenRouter, NVIDIA NIM, etc.)
+    llm_provider: Literal["ollama", "openai_compatible"] = "ollama"
+    openai_api_key: str = ""
+    openai_base_url: str = "https://api.groq.com/openai/v1"
+    openai_model: str = "openai/gpt-oss-20b"
+
     compiler_standard: str = "c11"
     compiler_flags: tuple[str, ...] = ("-std=c11", "-O2", "-Wall", "-Wextra")
+
+    @model_validator(mode="after")
+    def _resolve_llm_defaults(self) -> Settings:
+        if not self.openai_api_key:
+            env_key = (
+                os.getenv("AUTOGRADER_OPENAI_API_KEY")
+                or os.getenv("GROQ_API_KEY")
+                or os.getenv("Groq_API_Key")
+                or os.getenv("OPENAI_API_KEY")
+                or ""
+            )
+            if env_key:
+                self.openai_api_key = env_key
+        # Provider selection is explicit. Merely having a key in the process
+        # environment must not silently switch a local Ollama deployment to a
+        # remote provider.
+        return self
 
 
 @lru_cache

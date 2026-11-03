@@ -8,7 +8,7 @@ from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, Response
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings, get_settings
@@ -25,8 +25,8 @@ from app.db.models import (
     Submission,
     SubmissionBatch,
 )
-from app.llm.client import OllamaClient
-from app.rules import RulesError
+from app.llm.client import build_llm_client
+from app.rules import RulesError, normalize_rules
 from app.schemas import (
     AssignmentDetail,
     AssignmentSpec,
@@ -55,12 +55,18 @@ from app.sandbox.runner import BubblewrapSandboxRunner, DockerSandboxRunner
 from app.services.assignments import (
     activate_version,
     create_assignment,
+    delete_version,
     get_assignment,
     get_version,
     prepare_assignment,
 )
 from app.services.evaluation import EvaluationCoordinator
-from app.services.uploads import UploadValidationError, create_batch
+from app.services.uploads import (
+    UploadConflictError,
+    UploadValidationError,
+    append_to_batch,
+    create_batch,
+)
 
 
 router = APIRouter(prefix="/api")
@@ -89,10 +95,14 @@ def _assignment_summary(assignment: Assignment) -> AssignmentSummary:
     return AssignmentSummary.model_validate(assignment)
 
 
-def _batch_summary(batch: SubmissionBatch) -> BatchSummary:
+def _batch_summary(
+    batch: SubmissionBatch, version: AssignmentVersion | None = None
+) -> BatchSummary:
     return BatchSummary(
         id=batch.id,
+        assignment_id=version.assignment_id if version else None,
         assignment_version_id=batch.assignment_version_id,
+        version_number=version.version_number if version else None,
         status=batch.status,
         summary=batch.summary_json,
         created_at=batch.created_at,
@@ -157,8 +167,34 @@ def _live_evaluation(
     )
 
 
-def _submission_summary(submission: Submission) -> SubmissionSummary:
-    return SubmissionSummary.model_validate(submission)
+def _submission_summary(
+    submission: Submission,
+    similarity_score: float | None = None,
+) -> SubmissionSummary:
+    return SubmissionSummary.model_validate(submission).model_copy(
+        update={
+            "similarity_flagged": similarity_score is not None,
+            "similarity_score": similarity_score,
+        }
+    )
+
+
+def _similarity_scores(db: Session, submission_ids: list[str]) -> dict[str, float]:
+    if not submission_ids:
+        return {}
+    rows = db.scalars(
+        select(SimilarityFinding).where(
+            or_(
+                SimilarityFinding.left_submission_id.in_(submission_ids),
+                SimilarityFinding.right_submission_id.in_(submission_ids),
+            )
+        )
+    ).all()
+    scores: dict[str, float] = {}
+    for row in rows:
+        scores[row.left_submission_id] = max(scores.get(row.left_submission_id, 0.0), row.score)
+        scores[row.right_submission_id] = max(scores.get(row.right_submission_id, 0.0), row.score)
+    return scores
 
 
 def _evaluation_summary(run: EvaluationRun) -> EvaluationSummary:
@@ -194,11 +230,15 @@ def dependency_health(settings: Settings = Depends(get_settings)) -> Dependencie
         dependencies.append(
             DependencyHealth(name="docker", available=docker_available, detail=docker_detail)
         )
-    ollama_available, ollama_detail, model = OllamaClient(settings).health_sync()
+    llm = build_llm_client(settings)
+    llm_available, llm_detail, model = llm.health_sync()
+    llm_name = (
+        "groq"
+        if "groq" in settings.openai_base_url.lower() and settings.llm_provider != "ollama"
+        else ("ollama" if settings.llm_provider == "ollama" else "llm")
+    )
     dependencies.append(
-        DependencyHealth(
-            name="ollama", available=ollama_available, detail=ollama_detail, version=model
-        )
+        DependencyHealth(name=llm_name, available=llm_available, detail=llm_detail, version=model)
     )
     return DependenciesResponse(
         configured_runner=settings.runner,
@@ -208,8 +248,14 @@ def dependency_health(settings: Settings = Depends(get_settings)) -> Dependencie
 
 @router.get("/settings/model-status", response_model=DependencyHealth)
 def model_status(settings: Settings = Depends(get_settings)) -> DependencyHealth:
-    available, detail, model = OllamaClient(settings).health_sync()
-    return DependencyHealth(name="ollama", available=available, detail=detail, version=model)
+    llm = build_llm_client(settings)
+    available, detail, model = llm.health_sync()
+    name = (
+        "groq"
+        if "groq" in settings.openai_base_url.lower() and settings.llm_provider != "ollama"
+        else ("ollama" if settings.llm_provider == "ollama" else "llm")
+    )
+    return DependencyHealth(name=name, available=available, detail=detail, version=model)
 
 
 @router.get("/assignments", response_model=list[AssignmentSummary])
@@ -240,10 +286,11 @@ def assignment_detail(assignment_id: str, db: Session = Depends(get_db)) -> Assi
         .where(AssignmentVersion.assignment_id == assignment.id)
         .order_by(AssignmentVersion.version_number.desc())
     ).all()
+    rules = normalize_rules(assignment.rules_json, assignment.problem_statement).raw
     return AssignmentDetail(
         **_assignment_summary(assignment).model_dump(),
         problem_statement=assignment.problem_statement,
-        rules=assignment.rules_json,
+        rules=rules,
         versions=[_version_summary(version) for version in versions],
     )
 
@@ -300,6 +347,25 @@ def activate_route(
         raise _http_error(exc, 409) from exc
 
 
+@router.delete(
+    "/assignments/{assignment_id}/versions/{version_number}",
+    status_code=204,
+)
+def delete_version_route(
+    assignment_id: str, version_number: int, db: Session = Depends(get_db)
+) -> Response:
+    version = get_version(db, assignment_id, version_number)
+    if not version:
+        raise HTTPException(
+            status_code=404, detail={"code": "not_found", "message": "assignment version not found"}
+        )
+    try:
+        delete_version(db, version)
+    except ValueError as exc:
+        raise _http_error(exc, 409) from exc
+    return Response(status_code=204)
+
+
 @router.post("/assignments/{assignment_id}/batches", response_model=BatchSummary, status_code=201)
 async def create_batch_route(
     assignment_id: str,
@@ -319,7 +385,51 @@ async def create_batch_route(
     except UploadValidationError as exc:
         db.rollback()
         raise _http_error(exc) from exc
-    return _batch_summary(batch)
+    return _batch_summary(batch, version)
+
+
+@router.post(
+    "/batches/{batch_id}/submissions",
+    response_model=list[SubmissionSummary],
+    status_code=201,
+)
+async def append_batch_submissions_route(
+    batch_id: str,
+    labels_json: str | None = Form(None),
+    files: list[UploadFile] = File(...),
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> list[SubmissionSummary]:
+    batch = db.get(SubmissionBatch, batch_id)
+    if not batch:
+        raise HTTPException(
+            status_code=404, detail={"code": "not_found", "message": "batch not found"}
+        )
+    try:
+        submissions = await append_to_batch(db, batch, files, settings, labels_json)
+    except UploadConflictError as exc:
+        db.rollback()
+        raise _http_error(exc, 409) from exc
+    except UploadValidationError as exc:
+        db.rollback()
+        raise _http_error(exc) from exc
+    return [_submission_summary(item) for item in submissions]
+
+
+@router.get("/batches", response_model=list[BatchSummary])
+def list_batches(db: Session = Depends(get_db)) -> list[BatchSummary]:
+    batches = db.scalars(select(SubmissionBatch).order_by(SubmissionBatch.created_at.desc())).all()
+    if not batches:
+        return []
+    versions = {
+        version.id: version
+        for version in db.scalars(
+            select(AssignmentVersion).where(
+                AssignmentVersion.id.in_([batch.assignment_version_id for batch in batches])
+            )
+        ).all()
+    }
+    return [_batch_summary(batch, versions.get(batch.assignment_version_id)) for batch in batches]
 
 
 @router.get("/batches/{batch_id}", response_model=BatchSummary)
@@ -329,7 +439,8 @@ def batch_detail(batch_id: str, db: Session = Depends(get_db)) -> BatchSummary:
         raise HTTPException(
             status_code=404, detail={"code": "not_found", "message": "batch not found"}
         )
-    return _batch_summary(batch)
+    version = db.get(AssignmentVersion, batch.assignment_version_id)
+    return _batch_summary(batch, version)
 
 
 @router.get("/batches/{batch_id}/live", response_model=BatchLiveResponse)
@@ -350,10 +461,11 @@ def batch_live(batch_id: str, db: Session = Depends(get_db)) -> BatchLiveRespons
     submissions = db.scalars(
         select(Submission).where(Submission.batch_id == batch_id).order_by(Submission.created_at)
     ).all()
+    version = db.get(AssignmentVersion, batch.assignment_version_id)
     submission_by_id = {submission.id: submission for submission in submissions}
     if not submissions:
         return BatchLiveResponse(
-            batch=_batch_summary(batch),
+            batch=_batch_summary(batch, version),
             total_submissions=0,
             queued=0,
             running=0,
@@ -418,7 +530,7 @@ def batch_live(batch_id: str, db: Session = Depends(get_db)) -> BatchLiveRespons
         timestamps.append(recent_events[0].created_at)
     last_updated_at = max(timestamps)
     return BatchLiveResponse(
-        batch=_batch_summary(batch),
+        batch=_batch_summary(batch, version),
         total_submissions=len(submissions),
         **counts,
         overall_progress=overall_progress,
@@ -432,7 +544,8 @@ def batch_live(batch_id: str, db: Session = Depends(get_db)) -> BatchLiveRespons
 @router.get("/batches/{batch_id}/submissions", response_model=list[SubmissionSummary])
 def batch_submissions(batch_id: str, db: Session = Depends(get_db)) -> list[SubmissionSummary]:
     submissions = db.scalars(select(Submission).where(Submission.batch_id == batch_id)).all()
-    return [_submission_summary(item) for item in submissions]
+    similarity_scores = _similarity_scores(db, [item.id for item in submissions])
+    return [_submission_summary(item, similarity_scores.get(item.id)) for item in submissions]
 
 
 @router.post(
@@ -473,7 +586,16 @@ def evaluate_batch(
             submission_id=submission.id,
             assignment_version_id=batch.assignment_version_id,
             state="queued",
-            config_snapshot={"runner": settings.runner, "docker_image": settings.docker_image},
+            config_snapshot={
+                "runner": settings.runner,
+                "docker_image": settings.docker_image,
+                "llm_provider": settings.llm_provider,
+                "llm_model": (
+                    settings.openai_model
+                    if settings.llm_provider == "openai_compatible"
+                    else settings.ollama_model
+                ),
+            },
         )
         db.add(run)
         db.flush()
@@ -589,8 +711,9 @@ def submission_result(submission_id: str, db: Session = Depends(get_db)) -> Subm
         if report
         else None
     )
+    similarity_score = _similarity_scores(db, [submission.id]).get(submission.id)
     return SubmissionResult(
-        submission=_submission_summary(submission),
+        submission=_submission_summary(submission, similarity_score),
         evaluation=_evaluation_summary(run) if run else None,
         score=score_response,
         report=report_response,
@@ -732,7 +855,19 @@ def export_batch_csv(batch_id: str, db: Session = Depends(get_db)) -> Response:
     rows = db.scalars(select(Submission).where(Submission.batch_id == batch_id)).all()
     output = io.StringIO()
     writer = csv.writer(output)
-    writer.writerow(["submission", "label", "status", "score", "evaluation_state", "error"])
+    writer.writerow(
+        [
+            "submission",
+            "label",
+            "status",
+            "similarity_status",
+            "similarity_score",
+            "score",
+            "evaluation_state",
+            "error",
+        ]
+    )
+    similarity_scores = _similarity_scores(db, [item.id for item in rows])
     for submission in rows:
         run = db.scalar(
             select(EvaluationRun)
@@ -749,6 +884,8 @@ def export_batch_csv(batch_id: str, db: Session = Depends(get_db)) -> Response:
                 _safe_csv(submission.original_filename),
                 _safe_csv(submission.label),
                 _safe_csv(submission.status),
+                _safe_csv("flagged" if submission.id in similarity_scores else "clean"),
+                _safe_csv(similarity_scores.get(submission.id)),
                 _safe_csv(score.total_score if score else None),
                 _safe_csv(run.state if run else None),
                 _safe_csv(run.error_summary if run else None),

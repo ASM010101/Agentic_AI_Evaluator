@@ -40,6 +40,28 @@ def test_bubblewrap_runner_compiles_runs_and_hides_host_project():
 
 
 @pytest.mark.skipif(shutil.which("bwrap") is None, reason="bubblewrap is not installed")
+def test_bubblewrap_resolves_compiler_inside_namespace(monkeypatch):
+    """A host-only GCC path must not be passed through to Bubblewrap."""
+
+    real_which = shutil.which
+
+    def pretend_host_compiler(name: str):
+        if name == "gcc":
+            return "/usr/local/bin/gcc"
+        return real_which(name)
+
+    monkeypatch.setattr("app.sandbox.runner.shutil.which", pretend_host_compiler)
+    runner = BubblewrapSandboxRunner(
+        Settings(runner="bubblewrap", bubblewrap_path="/usr/bin/bwrap")
+    )
+    result = runner.compile(
+        '#include <stdio.h>\nint main(void){puts("compiler-ok");return 0;}\n',
+        RunnerConfig(time_limit_s=1, memory_limit_mb=128, output_limit_bytes=10_000),
+    )
+    assert result.compiled is True, result.stderr
+
+
+@pytest.mark.skipif(shutil.which("bwrap") is None, reason="bubblewrap is not installed")
 def test_bubblewrap_runner_reports_cpu_limit_as_timeout():
     runner = BubblewrapSandboxRunner(Settings(runner="bubblewrap", bubblewrap_path="bwrap"))
     result = runner.run(

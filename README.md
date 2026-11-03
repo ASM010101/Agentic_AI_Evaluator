@@ -28,7 +28,7 @@ reference solution dependency.
   operate Docker, but Docker is not required by the default Linux path.
 - Deterministic fake runner for tests and development without Docker.
 - Assignment-scoped normalized token similarity with review dispositions.
-- Optional bounded Ollama client; deterministic mode works without Ollama.
+- Optional bounded Ollama/OpenAI-compatible client; deterministic mode works without an LLM.
 - Local C static-analysis evidence from Cppcheck, Flawfinder and Clang-Tidy;
   tool findings are review evidence and do not silently deduct points.
 - React + TypeScript + Vite dashboard with overview, assignment, upload/results,
@@ -49,10 +49,10 @@ logical roles:
 4. Feedback and report generation.
 5. Python coordination/state machine.
 
-The backend includes a bounded Ollama client and health check, but the current
-grading path is intentionally deterministic: scoring and reports do not call
-the model automatically. Role 5 is not an LLM worker. Ollama setup is therefore
-optional for the current dashboard demo.
+The backend includes bounded Ollama and OpenAI-compatible clients plus health
+checks, but the current grading path is intentionally deterministic: scoring
+and reports do not call the model automatically. Role 5 is not an LLM worker.
+An LLM provider is therefore optional for the current dashboard demo.
 
 ## Prerequisites
 
@@ -377,6 +377,30 @@ If Ollama Desktop is already running on Windows, do not start a second
 curl http://127.0.0.1:11434/api/tags
 ```
 
+### Optional Groq setup
+
+Groq is an OpenAI-compatible provider. It is used only for the bounded model
+client and readiness check; it does not replace GCC compilation or deterministic
+scoring. Put the credential in the ignored `backend/.env` (never in
+`.env.example` or source control):
+
+```dotenv
+AUTOGRADER_USE_LLM=true
+AUTOGRADER_LLM_PROVIDER=openai_compatible
+AUTOGRADER_OPENAI_API_KEY=<your-groq-key>
+AUTOGRADER_OPENAI_BASE_URL=https://api.groq.com/openai/v1
+AUTOGRADER_OPENAI_MODEL=openai/gpt-oss-20b
+```
+
+Verify the provider without exposing the credential:
+
+```bash
+curl http://127.0.0.1:8000/api/settings/model-status
+```
+
+If a key has ever been committed or pasted into a shared log, revoke it and
+create a replacement before continuing.
+
 ## Linux sandbox policy
 
 The default runner is Bubblewrap, not Docker. For every compile/run operation
@@ -438,11 +462,14 @@ Poll `/api/evaluations/<RUN_ID>` and inspect
 The local CLI is also available:
 
 ```bash
-AUTOGRADER_RUNNER=fake python -m app.cli \
+AUTOGRADER_RUNNER=bubblewrap python -m app.cli --runner bubblewrap \
   --assignment ../examples/add_two_integers/assignment.json \
   --submission ../examples/add_two_integers/correct.c \
   --submission ../examples/add_two_integers/buggy.c
 ```
+
+Run that command from `backend/` on Linux/WSL. It performs real GCC compilation,
+Bubblewrap execution and scoring; the fake runner is for tests only.
 
 ## Rules and oracle policy
 
@@ -451,6 +478,11 @@ such as `io_tests`, `compiler_warnings`, `static_analysis`, `function_split`,
 `complexity_estimator`, `sanitizer_run`, `readability`, or `similarity_flag`.
 The rubric controls weights and applicability; the agent does not invent a
 universal correctness percentage.
+
+Similarity is a mandatory system check for every evaluated batch. The rules JSON
+contains a `similarity` block with `enabled: true` and a `flag_threshold`; if it
+is omitted, the normalizer inserts the default threshold of `0.85`. Similarity
+is recorded as review-only evidence and never changes the grade automatically.
 
 Score-affecting tests must be `validated` and have an explicit expected output
 or an independently justified executable behavior. Candidate/unverified tests

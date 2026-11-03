@@ -42,6 +42,10 @@
         "params": {"flags": "-fsanitize=address,undefined"}
       }
     ],
+    "similarity": {
+      "enabled": true,
+      "flag_threshold": 0.85
+    },
     "tests": [
       {
         "id": "sample",

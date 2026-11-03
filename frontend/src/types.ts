@@ -56,7 +56,9 @@ export type AssignmentVersion = {
 
 export type Batch = {
   id: string;
+  assignment_id?: string | null;
   assignment_version_id: string;
+  version_number?: number | null;
   status: string;
   summary: Record<string, unknown>;
   created_at: string;
@@ -118,6 +120,8 @@ export type Submission = {
   content_hash: string;
   source_size: number;
   status: string;
+  similarity_flagged?: boolean;
+  similarity_score?: number | null;
   created_at: string;
 };
 

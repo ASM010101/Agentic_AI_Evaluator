@@ -3,11 +3,21 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from app.agents.assignment_agent import AssignmentUnderstandingAgent
-from app.db.models import Assignment, AssignmentVersion, AuditEvent, TestCase
+from app.db.models import (
+    Assignment,
+    AssignmentVersion,
+    AuditEvent,
+    Evidence,
+    EvaluationRun,
+    SimilarityFinding,
+    Submission,
+    SubmissionBatch,
+    TestCase,
+)
 from app.rules import NormalizedRules, can_activate, normalize_rules
 from app.schemas import AssignmentSpec, CreateAssignmentRequest
 
@@ -28,11 +38,11 @@ def _audit(
 def create_assignment(db: Session, request: CreateAssignmentRequest) -> Assignment:
     # Validate at creation time so invalid JSON rules never become a durable
     # assignment draft that the UI cannot explain.
-    normalize_rules(request.rules, request.problem_statement)
+    normalized = normalize_rules(request.rules, request.problem_statement)
     assignment = Assignment(
         name=request.name.strip(),
         problem_statement=request.problem_statement,
-        rules_json=request.rules,
+        rules_json=normalized.raw,
     )
     db.add(assignment)
     db.flush()
@@ -75,7 +85,7 @@ def prepare_assignment(
         assignment_id=assignment.id,
         version_number=version_number,
         problem_statement=request.problem_statement,
-        rules_json=request.rules,
+        rules_json=normalized.raw,
         spec_json=normalized.spec.model_dump(mode="json"),
         version_hash=normalized.rules_hash,
         status="needs_review" if normalized.spec.ambiguities else "prepared",
@@ -142,3 +152,35 @@ def activate_version(db: Session, version: AssignmentVersion) -> AssignmentVersi
     db.commit()
     db.refresh(version)
     return version
+
+
+def delete_version(db: Session, version: AssignmentVersion) -> None:
+    if version.status == "active":
+        raise ValueError("cannot delete the active version; activate another version first")
+
+    references = (
+        (SubmissionBatch, "submission batches"),
+        (Submission, "submissions"),
+        (EvaluationRun, "evaluation runs"),
+        (Evidence, "evidence records"),
+        (SimilarityFinding, "similarity findings"),
+    )
+    for model, label in references:
+        reference = db.scalar(
+            select(model.id).where(model.assignment_version_id == version.id).limit(1)
+        )
+        if reference is not None:
+            raise ValueError(f"cannot delete this version; it has {label} attached")
+
+    version_id = version.id
+    version_number = version.version_number
+    db.execute(delete(TestCase).where(TestCase.assignment_version_id == version_id))
+    db.delete(version)
+    _audit(
+        db,
+        "assignment_version",
+        version_id,
+        "deleted",
+        {"version_number": version_number},
+    )
+    db.commit()

@@ -45,7 +45,7 @@ def active_version(client: TestClient) -> str:
     return assignment_id
 
 
-def test_upload_rejects_path_traversal_and_duplicate_content():
+def test_upload_rejects_path_traversal_and_duplicate_filenames():
     with TestClient(app) as client:
         assignment_id = active_version(client)
         traversal = client.post(
@@ -56,7 +56,7 @@ def test_upload_rejects_path_traversal_and_duplicate_content():
             },
         )
         assert traversal.status_code == 422
-        duplicate = client.post(
+        exact_duplicate_sources = client.post(
             f"/api/assignments/{assignment_id}/batches",
             data={"version_number": "1"},
             files=[
@@ -64,4 +64,14 @@ def test_upload_rejects_path_traversal_and_duplicate_content():
                 ("files", ("two.c", io.BytesIO(b"int main(void) { return 0; }"), "text/plain")),
             ],
         )
-        assert duplicate.status_code == 422
+        assert exact_duplicate_sources.status_code == 201
+
+        duplicate_filename = client.post(
+            f"/api/assignments/{assignment_id}/batches",
+            data={"version_number": "1"},
+            files=[
+                ("files", ("same.c", io.BytesIO(b"int main(void) { return 0; }"), "text/plain")),
+                ("files", ("same.c", io.BytesIO(b"int main(void) { return 1; }"), "text/plain")),
+            ],
+        )
+        assert duplicate_filename.status_code == 422

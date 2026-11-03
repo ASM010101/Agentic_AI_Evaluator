@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import resource
 import selectors
 import signal
 import shutil
@@ -14,6 +13,14 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from app.core.config import Settings
+
+try:
+    import resource
+except ImportError:  # Windows
+    resource = None  # type: ignore[assignment]
+
+_SIGKILL = getattr(signal, "SIGKILL", 9)
+_SIGXCPU = getattr(signal, "SIGXCPU", 24)
 
 
 @dataclass(frozen=True)
@@ -84,12 +91,27 @@ def _bounded_text(value: bytes | str, limit: int) -> tuple[str, bool]:
     return text, False
 
 
+def _kill_process_group(process: subprocess.Popen[Any]) -> None:
+    if hasattr(os, "killpg"):
+        try:
+            os.killpg(process.pid, _SIGKILL)
+            return
+        except (ProcessLookupError, OSError):
+            pass
+    try:
+        process.kill()
+    except (ProcessLookupError, OSError):
+        pass
+
+
 def _set_process_limits(memory_limit_mb: int, cpu_limit_s: float) -> None:
     """Apply conservative inherited limits before entering the sandbox."""
 
+    if resource is None:
+        return
     memory_bytes = max(16, memory_limit_mb) * 1024 * 1024
-    cpu_seconds = max(1, int(cpu_limit_s) + 1)
     resource.setrlimit(resource.RLIMIT_AS, (memory_bytes, memory_bytes))
+    cpu_seconds = max(1, int(cpu_limit_s) + 1)
     resource.setrlimit(resource.RLIMIT_CPU, (cpu_seconds, cpu_seconds))
     resource.setrlimit(resource.RLIMIT_FSIZE, (1024 * 1024, 1024 * 1024))
     resource.setrlimit(resource.RLIMIT_NOFILE, (64, 64))
@@ -111,13 +133,18 @@ def _bounded_process(
 
     stdin_handle = stdin_path.open("rb") if stdin_path else subprocess.DEVNULL
     started = time.perf_counter()
+    popen_kwargs: dict[str, Any] = {
+        "stdin": stdin_handle,
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+    }
+    if os.name != "nt":
+        popen_kwargs["start_new_session"] = True
+        popen_kwargs["preexec_fn"] = lambda: _set_process_limits(memory_limit_mb, cpu_limit_s)
+
     process = subprocess.Popen(
         command,
-        stdin=stdin_handle,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        start_new_session=True,
-        preexec_fn=lambda: _set_process_limits(memory_limit_mb, cpu_limit_s),
+        **popen_kwargs,
     )
     selector = selectors.DefaultSelector()
     assert process.stdout is not None
@@ -134,7 +161,7 @@ def _bounded_process(
             remaining = deadline - time.perf_counter()
             if remaining <= 0:
                 timed_out = True
-                os.killpg(process.pid, signal.SIGKILL)
+                _kill_process_group(process)
                 break
             for key, _ in selector.select(min(0.1, remaining)):
                 chunk = os.read(key.fileobj.fileno(), 8192)
@@ -151,7 +178,7 @@ def _bounded_process(
     finally:
         selector.close()
         if process.poll() is None:
-            os.killpg(process.pid, signal.SIGKILL)
+            _kill_process_group(process)
         process.wait()
         if stdin_handle is not subprocess.DEVNULL:
             stdin_handle.close()
@@ -358,6 +385,8 @@ class BubblewrapSandboxRunner:
         )
 
     def availability(self) -> tuple[bool, str]:
+        if os.name == "nt":
+            return False, "Bubblewrap is not supported on Windows; run inside Linux/WSL."
         bwrap = self._binary()
         if not bwrap:
             return False, "Bubblewrap is not installed; install the Linux bubblewrap package."
@@ -381,9 +410,19 @@ class BubblewrapSandboxRunner:
             "--die-with-parent",
             "--new-session",
         ]
-        for root in self._RO_BIND_ROOTS:
+        for root in ("/usr", "/usr/local", "/etc"):
             if Path(root).exists():
                 args.extend(["--ro-bind", root, root])
+        for sym in ("/bin", "/sbin", "/lib", "/lib64"):
+            p = Path(sym)
+            if p.is_symlink():
+                try:
+                    target = os.readlink(sym)
+                    args.extend(["--symlink", target, sym])
+                except OSError:
+                    pass
+            elif p.exists():
+                args.extend(["--ro-bind", sym, sym])
         args.extend(
             [
                 "--proc",
@@ -430,7 +469,10 @@ class BubblewrapSandboxRunner:
         source_path = workspace / "submission.c"
         source_path.write_text(source, encoding="utf-8")
         source_path.chmod(0o644)
-        gcc = shutil.which("gcc") or "/usr/bin/gcc"
+        # Resolve the compiler inside Bubblewrap, not on the host. An absolute
+        # host path such as /usr/local/bin/gcc may not exist in the namespace;
+        # the isolated PATH is deliberately populated with the mounted toolchain.
+        gcc = "gcc"
         command = self._command(
             workspace,
             [
@@ -535,7 +577,7 @@ class BubblewrapSandboxRunner:
                 )
             stdout_text, stdout_cut = _bounded_text(stdout, config.output_limit_bytes)
             stderr_text, stderr_cut = _bounded_text(stderr, config.output_limit_bytes)
-            resource_limited = exit_code in {137, -signal.SIGXCPU, -signal.SIGKILL}
+            resource_limited = exit_code in {137, -_SIGXCPU, -_SIGKILL}
             return ExecutionResult(
                 ran=True,
                 exit_code=exit_code,
@@ -565,13 +607,16 @@ class BubblewrapSandboxRunner:
         """Run a source-only analyzer inside the same namespace policy."""
 
         available, detail = self.availability()
-        tool_path = shutil.which(tool)
+        tool_candidate = shutil.which(tool)
         if not available:
             return ToolAnalysisResult(tool, False, None, "", "", 0.0, error=detail)
-        if not tool_path:
+        if not tool_candidate:
             return ToolAnalysisResult(
                 tool, False, None, "", "", 0.0, error=f"{tool} is not installed"
             )
+        # As with GCC, pass the tool name so Bubblewrap resolves it against the
+        # namespace PATH rather than using a host-only absolute path.
+        tool_path = tool
         with self._workspace() as workspace_name:
             workspace = Path(workspace_name)
             source_path = workspace / "submission.c"

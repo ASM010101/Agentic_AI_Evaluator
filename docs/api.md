@@ -6,12 +6,15 @@ routes are under `/api`.
 | Route | Purpose |
 |---|---|
 | `GET /api/health` | API liveness |
-| `GET /api/health/dependencies` | Configured runner, GCC, Bubblewrap and Ollama readiness |
+| `GET /api/health/dependencies` | Configured runner, GCC, Bubblewrap and configured LLM-provider readiness |
 | `GET/POST /api/assignments` | List/create assignments |
 | `GET /api/assignments/{id}` | Assignment and versions |
 | `POST /api/assignments/{id}/prepare` | Create a new immutable prepared version |
 | `POST /api/assignments/{id}/versions/{version}/activate` | Activate a validated version |
+| `DELETE /api/assignments/{id}/versions/{version}` | Delete an unused, non-active version |
 | `POST /api/assignments/{id}/batches` | Upload `.c` files for an active version |
+| `GET /api/batches` | List persisted submission batches, newest first |
+| `POST /api/batches/{id}/submissions` | Append `.c` files to an existing batch |
 | `POST /api/batches/{id}/evaluate` | Queue/idempotently start evaluation |
 | `GET /api/batches/{id}/live` | Live batch progress, current/next stage and audit-backed activity |
 | `GET /api/evaluations/{id}` | Poll a durable run |
@@ -38,6 +41,10 @@ version; it is not a grade or a student account.
   "rules": {
     "time_limit_s": 1,
     "memory_limit_mb": 64,
+    "similarity": {
+      "enabled": true,
+      "flag_threshold": 0.85
+    },
     "metrics": [
       {"name": "correctness", "analyzer": "io_tests", "weight": 1.0,
        "scoring": {"mode": "test_ratio"}}
@@ -51,5 +58,8 @@ version; it is not a grade or a student account.
 }
 ```
 
-The rules are instructor-owned. Model-generated candidates, missing expected
-behavior and unresolved contradictory policies are not silently activated.
+The rules are instructor-owned. The `similarity` block is mandatory system
+configuration: it is enabled automatically when omitted, cannot be disabled,
+and runs for every evaluated batch as review-only evidence. Model-generated
+candidates, missing expected behavior and unresolved contradictory policies are
+not silently activated.
