@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from app.agents.contracts import FeedbackAgentOutput
@@ -53,6 +54,34 @@ USEFULNESS_LIMITATIONS = {
 }
 
 
+def _extract_student_name(filename: str, label: str | None = None) -> str:
+    """Extract a clean, readable student name from filename or label.
+
+    Handles conventions dynamically for any student:
+      - Jane_Doe_assg01.c -> Jane Doe
+      - student101_assg01.c -> student101
+      - Alex-assignment1.c -> Alex
+      - assg01_Rohan.c -> Rohan
+      - Alice.c -> Alice
+    """
+    if label and label != filename:
+        return label
+
+    stem = filename or ""
+    if stem.lower().endswith(".c"):
+        stem = stem[:-2]
+
+    parts = [p for p in re.split(r"[_\-]+", stem) if p]
+    if len(parts) >= 2:
+        prefix_pattern = r"^(?:assg|assignment|hw|homework|lab|task|problem|prob|p|ex|exercise)\d*$"
+        if re.match(prefix_pattern, parts[0], re.IGNORECASE):
+            return " ".join(parts[1:])
+        if re.match(prefix_pattern, parts[-1], re.IGNORECASE):
+            return " ".join(parts[:-1])
+        return " ".join(parts)
+    return stem or "Anonymous Student"
+
+
 def build_report(
     *,
     assignment: dict[str, Any] | None = None,
@@ -64,6 +93,15 @@ def build_report(
     agent_feedback: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     assignment = assignment or {}
+    filename = submission.get("filename") or "submission.c"
+    label = submission.get("label") or filename
+    student_name = submission.get("student_name") or _extract_student_name(filename, label)
+    submission_payload = {
+        **submission,
+        "filename": filename,
+        "label": label,
+        "student_name": student_name,
+    }
     assignment_payload = {
         "id": assignment.get("id"),
         "name": assignment.get("name") or "Untitled assignment",
@@ -135,8 +173,9 @@ def build_report(
     grade = (score or {}).get("total_score")
     report = {
         "schema_version": "1.0",
+        "student_name": student_name,
         "assignment": assignment_payload,
-        "submission": submission,
+        "submission": submission_payload,
         "assignment_version_hash": version_hash,
         "evaluation": evaluation,
         "score": score,
@@ -370,6 +409,13 @@ def render_text(report: dict[str, Any]) -> str:
     score = report.get("score") or {}
     assignment = report.get("assignment") or {}
     submission = report.get("submission") or {}
+    filename = submission.get("filename") or "submission.c"
+    label = submission.get("label") or filename
+    student_name = (
+        submission.get("student_name")
+        or report.get("student_name")
+        or _extract_student_name(filename, label)
+    )
     summary = report.get("summary") or {}
     grade = summary.get("overall_score", score.get("total_score"))
     grade_text = f"{grade:.2f} / 100" if isinstance(grade, (int, float)) else "Not finalized"
@@ -381,14 +427,16 @@ def render_text(report: dict[str, Any]) -> str:
         "=" * 78,
         "AutoGrader | Student Evaluation Report",
         "=" * 78,
+        f"Student Name:     {student_name}",
+        f"Submission file:  {filename}",
+        f"Submission label: {label}",
         f"Assignment:       {assignment.get('name', 'Untitled assignment')}",
-        f"Submission file:  {submission.get('filename', 'submission.c')}",
-        f"Submission label: {submission.get('label', submission.get('filename', ''))}",
         f"Evaluation:       {grade_status}",
         f"Overall score:    {grade_text}",
         "",
         "EXECUTIVE SUMMARY",
         "------------------",
+        f"Report for Student: {student_name} (File: {filename})",
         str(
             (report.get("feedback") or {}).get("summary")
             or "The deterministic evaluation is complete."
