@@ -36,7 +36,7 @@ Do not invent rubric criteria, weights, a reference implementation, or a hidden
 oracle. Propose useful edge/boundary tests, but every proposal must remain a
 candidate because a model assertion is not an authoritative expected result.
 Return only a concise structured JSON object matching the supplied schema.
-Propose at most 4 candidate tests. Keep each text, rationale and oracle basis
+Propose 10 to 15 candidate tests covering normal, boundary, zero, negative, overflow, extreme values, format variations, and likely-bug cases. Keep each text, rationale and oracle basis
 under 160 characters; do not repeat the assignment or explain your reasoning.
 prefer the highest-value normal, boundary, empty, invalid-input (only if
 specified), and likely-bug cases.

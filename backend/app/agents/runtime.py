@@ -120,11 +120,10 @@ class AgentRuntime:
             )
 
         field_names = ", ".join(output_model.model_fields)
-        # The provider already receives JSON mode and the caller validates the
-        # full Pydantic contract.  Repeating a large JSON schema in every prompt
-        # wastes context/token quota and can cause Groq TPM failures.
+        schema_props = json.dumps(output_model.model_json_schema().get("properties", {}), default=str)
         bounded_prompt = (
-            f"{prompt}\n\nReturn only a JSON object with these top-level fields: {field_names}."
+            f"{prompt}\n\nReturn only a valid JSON object matching these schema properties:\n{schema_props}\n"
+            f"Top-level keys: {field_names}."
         )
         try:
             raw = _run_async(
@@ -134,9 +133,14 @@ class AgentRuntime:
             error = str(exc)
             if self.settings.openai_api_key:
                 error = error.replace(self.settings.openai_api_key, "[redacted]")
-            # A rate limit is specific to this request window; do not suppress
-            # the later independent agents because Agent 2 happened to hit it.
-            if getattr(exc, "status_code", None) != 429:
+            # A rate limit or timeout is temporary; do not suppress
+            # the later independent agents because one call happened to hit it.
+            is_transient = (
+                getattr(exc, "status_code", None) in {429, 500, 502, 503, 504}
+                or "timeout" in error.lower()
+                or "timed out" in error.lower()
+            )
+            if not is_transient:
                 self._provider_error = error[:1_000]
             return AgentCallResult(
                 **common,

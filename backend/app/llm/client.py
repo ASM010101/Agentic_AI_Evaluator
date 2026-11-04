@@ -98,6 +98,9 @@ class OllamaClient:
                         return parsed
                 except (httpx.HTTPError, ValueError, OllamaError) as exc:
                     last_error = exc
+                    if getattr(exc, "status_code", None) == 429 and _attempt < self.settings.openai_max_retries:
+                        await asyncio.sleep(2.0 * (_attempt + 1))
+                        continue
         raise OllamaError(str(last_error or "Ollama request failed"))
 
     def health_sync(self) -> tuple[bool, str, str | None]:
@@ -230,6 +233,9 @@ class OpenAICompatibleClient:
                         return parsed
                 except (httpx.HTTPError, ValueError, OllamaError) as exc:
                     last_error = exc
+                    if getattr(exc, "status_code", None) == 429 and _attempt < self.settings.openai_max_retries:
+                        await asyncio.sleep(2.0 * (_attempt + 1))
+                        continue
         if last_error is None:
             message = "LLM request failed"
         else:

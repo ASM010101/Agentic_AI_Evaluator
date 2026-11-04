@@ -482,6 +482,7 @@ class BubblewrapSandboxRunner:
                 "/work/submission.c",
                 "-o",
                 "/work/program",
+                "-lm",
             ],
         )
         try:
@@ -675,6 +676,8 @@ class FakeSandboxRunner:
     def compile(self, source: str, config: RunnerConfig) -> CompileResult:
         self._delay()
         self.calls.append({"operation": "compile", "source_hash": hash(source), "config": config})
+        if "fail_compile" in source:
+            return CompileResult(False, 1, "", "syntax error: unexpected token", 1.0)
         return self.compile_result
 
     def run(

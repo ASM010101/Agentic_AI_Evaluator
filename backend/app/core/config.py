@@ -46,12 +46,12 @@ class Settings(BaseSettings):
     ollama_base_url: str = "http://127.0.0.1:11434"
     ollama_model: str = "llama3.1:latest"
     ollama_connect_timeout_s: float = Field(default=2.0, gt=0, le=30)
-    ollama_read_timeout_s: float = Field(default=45.0, gt=0, le=600)
+    ollama_read_timeout_s: float = Field(default=120.0, gt=0, le=600)
     ollama_max_retries: int = Field(default=1, ge=0, le=3)
     ollama_max_concurrency: int = Field(default=1, gt=0, le=8)
     openai_connect_timeout_s: float = Field(default=2.0, gt=0, le=30)
-    openai_read_timeout_s: float = Field(default=30.0, gt=0, le=600)
-    openai_max_retries: int = Field(default=0, ge=0, le=3)
+    openai_read_timeout_s: float = Field(default=90.0, gt=0, le=600)
+    openai_max_retries: int = Field(default=2, ge=0, le=5)
     llm_max_output_tokens: int = Field(default=900, ge=128, le=8_000)
     use_llm: bool = False
 
@@ -74,7 +74,7 @@ class Settings(BaseSettings):
     openai_model: str = "openai/gpt-oss-20b"
 
     compiler_standard: str = "c11"
-    compiler_flags: tuple[str, ...] = ("-std=c11", "-O2", "-Wall", "-Wextra")
+    compiler_flags: tuple[str, ...] = ("-std=c11", "-O2", "-Wall", "-Wextra", "-lm")
 
     @model_validator(mode="after")
     def _resolve_llm_defaults(self) -> Settings:

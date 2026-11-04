@@ -270,19 +270,21 @@ def _add_compile_evidence(
         ),
         None,
     )
-    if criterion is None:
-        return
     if result.unavailable:
         status = "unavailable"
         score = None
         summary = result.error or "compiler sandbox unavailable"
     elif result.compiled:
         warnings = len(re.findall(r"\bwarning:", result.stderr, flags=re.IGNORECASE))
-        threshold = int(criterion.params.get("max_warnings", 0))
-        score = (
-            1.0 if warnings <= threshold else max(0.0, 1.0 - min(1.0, (warnings - threshold) / 10))
-        )
-        status = "pass" if score >= 1 else "fail"
+        if criterion:
+            threshold = int(criterion.params.get("max_warnings", 0))
+            score = (
+                1.0 if warnings <= threshold else max(0.0, 1.0 - min(1.0, (warnings - threshold) / 10))
+            )
+            status = "pass" if score >= 1 else "fail"
+        else:
+            score = 1.0
+            status = "pass"
         summary = f"Compilation succeeded with {warnings} warning(s)."
     else:
         status = "fail"
@@ -296,7 +298,7 @@ def _add_compile_evidence(
         source_type="compiler",
         status=status,
         summary=summary,
-        criterion_id=criterion.id,
+        criterion_id=criterion.id if criterion else None,
         details={
             "normalized_score": score,
             "compiled": result.compiled,
@@ -305,6 +307,7 @@ def _add_compile_evidence(
             "stderr": result.stderr,
             "duration_ms": result.duration_ms,
             "unavailable": result.unavailable,
+            "scoring_impact": criterion is not None,
         },
         provenance={"tool": "gcc", "standard": "c11"},
     )
@@ -577,16 +580,16 @@ Return at most 3 findings. Keep each summary under 25 words; use compact
 complexity labels such as O(1), O(n), O(logn), O(nlogn), or O(n^2).
 
 <ASSIGNMENT_SPEC>
-{bounded_json(spec.model_dump(mode="json"), 8_000)}
+{bounded_json(spec.model_dump(mode="json"), 2_500)}
 </ASSIGNMENT_SPEC>
 <STUDENT_SOURCE>
-{submission.source_content[:20_000]}
+{submission.source_content[:4_000]}
 </STUDENT_SOURCE>
 <DETERMINISTIC_ANALYSIS>
-{bounded_json(deterministic_payload, 3_000)}
+{bounded_json(deterministic_payload, 2_000)}
 </DETERMINISTIC_ANALYSIS>
 <PERSISTED_EVIDENCE>
-{bounded_json([{"id": item.id, "source_type": item.source_type, "status": item.status, "summary": item.summary, "details": item.details_json} for item in existing_rows], 8_000)}
+{bounded_json([{"id": item.id, "source_type": item.source_type, "status": item.status, "summary": item.summary} for item in existing_rows[-8:]], 2_000)}
 </PERSISTED_EVIDENCE>
 """.strip()
     call = runtime.run(
@@ -689,16 +692,16 @@ Use one short explanation under 60 words and at most 3 caveats; do not repeat
 the source code.
 
 <ASSIGNMENT_CONTEXT>
-{version.problem_statement[:4_000]}
+{version.problem_statement[:1_500]}
 </ASSIGNMENT_CONTEXT>
 <DETERMINISTIC_MATCH>
-{bounded_json({"score": score, **details}, 5_000)}
+{bounded_json({"score": score, **details}, 2_000)}
 </DETERMINISTIC_MATCH>
 <LEFT_SOURCE filename="{left.original_filename}">
-{left.source_content[:8_000]}
+{left.source_content[:3_000]}
 </LEFT_SOURCE>
 <RIGHT_SOURCE filename="{right.original_filename}">
-{right.source_content[:8_000]}
+{right.source_content[:3_000]}
 </RIGHT_SOURCE>
 """.strip()
     call = runtime.run(
@@ -777,6 +780,15 @@ def _run_feedback_agent(
     evidence_payload: list[dict[str, Any]],
     assignment_name: str = "Untitled assignment",
 ) -> tuple[dict[str, Any], AgentCallResult]:
+    compact_evidence = [
+        {
+            "id": item.get("id"),
+            "source_type": item.get("source_type"),
+            "status": item.get("status"),
+            "summary": item.get("summary"),
+        }
+        for item in evidence_payload
+    ]
     prompt = f"""
 You are Agent 4, the student-feedback writer in AutoGrader. Write concise,
 professional feedback that an instructor can share with the student.
@@ -796,17 +808,17 @@ evidence-linked issues and 3 concrete next steps. Be specific and concise.
 
 <ASSIGNMENT>
 name={assignment_name}
-{version.problem_statement[:4_000]}
+{version.problem_statement[:2_000]}
 </ASSIGNMENT>
 <SUBMISSION>
 filename={submission.original_filename}
-source={submission.source_content[:12_000]}
+source={submission.source_content[:3_500]}
 </SUBMISSION>
 <DETERMINISTIC_SCORE>
-{bounded_json(score_payload, 5_000)}
+{bounded_json(score_payload, 2_000)}
 </DETERMINISTIC_SCORE>
 <EVIDENCE>
-{bounded_json(evidence_payload, 15_000)}
+{bounded_json(compact_evidence, 3_000)}
 </EVIDENCE>
 """.strip()
     call = runtime.run(
@@ -1009,6 +1021,56 @@ class EvaluationCoordinator:
                 db.commit()
                 return
             if not compile_result.compiled:
+                run.error_summary = _compile_diagnostic(compile_result)
+                # Record test evidence indicating tests were not executed due to compilation failure
+                test_criteria = _criterion_for_test(spec)
+                tests = db.scalars(
+                    select(TestCase).where(TestCase.assignment_version_id == version.id)
+                ).all()
+                validated_tests = [
+                    test for test in tests if test.status == "validated" and test.score_affecting
+                ]
+                for test in validated_tests:
+                    test_id = str(test.metadata_json.get("test_id", test.id))
+                    for criterion in test_criteria:
+                        _evidence(
+                            db,
+                            run,
+                            version,
+                            submission,
+                            source_type="test_runner",
+                            status="fail",
+                            summary=f"Test {test_id} not executed: compilation failed.",
+                            criterion_id=criterion.id,
+                            test_id=test_id,
+                            details={
+                                "normalized_score": 0.0,
+                                "exit_code": compile_result.exit_code,
+                                "duration_ms": 0.0,
+                                "timed_out": False,
+                                "stderr": compile_result.stderr,
+                            },
+                            input_data=test.input_data,
+                            expected_output=test.expected_output,
+                            actual_output=None,
+                            provenance={"runner": self.settings.runner, "reason": "compilation_failed"},
+                        )
+                # Source metrics and static analysis on submitted C source
+                metrics = source_metrics(submission.source_content)
+                complexity_required = next(
+                    (
+                        str(criterion.params.get("required"))
+                        for criterion in spec.criteria
+                        if criterion.analyzer in {"complexity_estimator", "complexity"}
+                        and criterion.params.get("required")
+                    ),
+                    None,
+                )
+                solution = analyze_solution(submission.source_content, complexity_required)
+                _add_source_evidence(
+                    db, run, version, submission, spec, metrics, solution.estimated_time_complexity
+                )
+                _add_local_tool_evidence(db, run, version, submission, self.settings, self.runner)
                 _add_llm_solution_evidence(
                     db,
                     run,
@@ -1018,7 +1080,106 @@ class EvaluationCoordinator:
                     self.agent_runtime,
                     None,
                 )
-                run.error_summary = _compile_diagnostic(compile_result)
+
+                # Calculate deterministic score
+                evidence_rows = db.scalars(select(Evidence).where(Evidence.run_id == run.id)).all()
+                evidence = [
+                    EvidenceLike(
+                        id=item.id,
+                        criterion_id=item.rubric_criterion_id,
+                        test_id=item.test_id,
+                        status=item.status,
+                        details=item.details_json,
+                    )
+                    for item in evidence_rows
+                ]
+                score = calculate_score(
+                    spec.criteria,
+                    [NormalizedTest.model_validate(test) for test in spec.tests],
+                    evidence,
+                )
+                criteria_payload = [
+                    {
+                        "criterion_id": item.criterion_id,
+                        "name": item.name,
+                        "weight": item.weight,
+                        "points": 0.0,
+                        "contribution": 0.0,
+                        "status": "fail",
+                        "reason": "Compilation failed; no points awarded.",
+                        "evidence_ids": item.evidence_ids,
+                    }
+                    for item in score.criteria
+                ]
+                score_payload = {
+                    "total_score": 0.0,
+                    "finalized": True,
+                    "scoring_rule_version": "deterministic-v1",
+                    "criteria": criteria_payload,
+                    "calculation_trace": score.calculation_trace,
+                }
+                db.add(
+                    ScoreBreakdown(
+                        run_id=run.id,
+                        total_score=score_payload["total_score"],
+                        finalized=score.finalized,
+                        scoring_rule_version="deterministic-v1",
+                        criteria_json=score_payload["criteria"],
+                        calculation_trace_json=score.calculation_trace,
+                    )
+                )
+                evidence_payload = [
+                    {
+                        "id": item.id,
+                        "source_type": item.source_type,
+                        "test_id": item.test_id,
+                        "status": item.status,
+                        "summary": item.summary,
+                        "input": item.input_data,
+                        "expected_output": item.expected_output,
+                        "actual_output": item.actual_output,
+                        "details": item.details_json,
+                    }
+                    for item in evidence_rows
+                ]
+                assignment = db.get(Assignment, version.assignment_id)
+                assignment_name = assignment.name if assignment else "Untitled assignment"
+                report_payload = build_report(
+                    assignment={
+                        "id": version.assignment_id,
+                        "name": assignment_name,
+                        "version_number": version.version_number,
+                        "problem_statement": version.problem_statement,
+                    },
+                    submission={
+                        "id": submission.id,
+                        "filename": submission.original_filename,
+                        "label": submission.label,
+                    },
+                    evaluation={
+                        "run_id": run.id,
+                        "state": "failed",
+                        "progress": 100,
+                    },
+                    score=score_payload,
+                    evidence=evidence_payload,
+                    version_hash=version.version_hash,
+                )
+                json_path, text_path = write_report_artifacts(
+                    Path(self.settings.artifact_dir),
+                    run.id,
+                    report_payload,
+                    render_text(report_payload),
+                )
+                db.add(
+                    Report(
+                        run_id=run.id,
+                        report_json=report_payload,
+                        json_path=json_path,
+                        text_path=text_path,
+                    )
+                )
+                run.progress = 100
                 run.state = transition(run.state, RunState.FAILED)
                 run.current_stage = "compile_failed"
                 run.completed_at = utcnow()

@@ -70,10 +70,11 @@ def _extract_student_name(filename: str, label: str | None = None) -> str:
     stem = filename or ""
     if stem.lower().endswith(".c"):
         stem = stem[:-2]
+    stem = re.sub(r"\s*\(\d+\)$", "", stem)
 
     parts = [p for p in re.split(r"[_\-]+", stem) if p]
     if len(parts) >= 2:
-        prefix_pattern = r"^(?:assg|assignment|hw|homework|lab|task|problem|prob|p|ex|exercise)\d*$"
+        prefix_pattern = r"^(?:assg|assignment|hw|homework|lab|task|problem|prob|p|ex|exercise)[a-z]?\d*$"
         if re.match(prefix_pattern, parts[0], re.IGNORECASE):
             return " ".join(parts[1:])
         if re.match(prefix_pattern, parts[-1], re.IGNORECASE):

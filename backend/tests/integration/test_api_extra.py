@@ -299,3 +299,43 @@ def test_active_or_referenced_versions_cannot_be_deleted():
         )
         referenced_delete = client.delete(f"/api/assignments/{assignment_id}/versions/2")
         assert referenced_delete.status_code == 409
+
+
+def test_compilation_failure_generates_report_and_feedback():
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/assignments",
+            json={"name": "Compile fail test", "problem_statement": "Print 0.", "rules": make_rules()},
+        )
+        assignment_id = created.json()["id"]
+        assert client.post(f"/api/assignments/{assignment_id}/prepare").status_code == 200
+        assert client.post(f"/api/assignments/{assignment_id}/versions/1/activate").status_code == 200
+
+        batch = client.post(
+            f"/api/assignments/{assignment_id}/batches",
+            data={"version_number": "1"},
+            files={"files": ("Aman_assg01.c", io.BytesIO(b"fail_compile\nint main() { return 1; }"), "text/plain")},
+        )
+        assert batch.status_code == 201
+        batch_id = batch.json()["id"]
+
+        evaluated = client.post(f"/api/batches/{batch_id}/evaluate")
+        assert evaluated.status_code == 202
+
+        submissions = client.get(f"/api/batches/{batch_id}/submissions").json()
+        sub_id = submissions[0]["id"]
+        results = client.get(f"/api/submissions/{sub_id}/results").json()
+
+        assert results["evaluation"]["state"] == "failed"
+        assert results["evaluation"]["current_stage"] == "compile_failed"
+        assert results["report"] is not None
+        assert results["score"] is not None
+        assert results["score"]["total_score"] == 0.0
+
+        report_id = results["report"]["id"]
+        report_txt = client.get(f"/api/reports/{report_id}/download?format=txt").text
+        assert "Student Name:     Aman" in report_txt
+        assert "Submission file:  Aman_assg01.c" in report_txt
+        assert "Overall score:    0.00 / 100" in report_txt
+        assert "COMPILATION" in report_txt
+        assert "syntax error" in report_txt
